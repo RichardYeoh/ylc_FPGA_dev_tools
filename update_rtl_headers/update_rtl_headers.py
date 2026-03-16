@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from dataclasses import dataclass
 import re
 from pathlib import Path
+import threading
+import time
+import queue
 
 
-SOURCE_EXTENSIONS = {".v", ".vh", ".sv", ".svh"}
 AUTHOR_VALUE = "ylcheng"
 
 LINE_COMMENT_RE = re.compile(r"^(?P<indent>\s*//\s*)(?P<body>.*?)(?P<newline>\r?\n?)$")
@@ -28,9 +31,38 @@ RELEASE_ROW_RE = re.compile(r"^//(?P<indent>\s*)\S+\s+\d{4}-\d{2}-\d{2}\s+")
 AUTHOR_MATCH_TARGETS = ("yanglicheng", "lichengyang")
 AUTHOR_MATCH_THRESHOLD = 8
 
+DEFAULT_LABELS = {
+    "apply_mode": "APPLY",
+    "check_mode": "CHECK",
+    "root": "root",
+    "scanned": "scanned source files",
+    "updated": "updated",
+    "would_update": "would update",
+    "files": "file(s)",
+}
+
+CHINESE_LABELS = {
+    "apply_mode": "执行",
+    "check_mode": "检查",
+    "root": "目录",
+    "scanned": "扫描文件数",
+    "updated": "已更新",
+    "would_update": "可更新",
+    "files": "个",
+}
+
+
+@dataclass
+class RunReport:
+    root: Path
+    total_files: int
+    changed_files: list[Path]
+    apply_changes: bool
+    duration_sec: float
+
 
 def iter_source_files(root: Path) -> list[Path]:
-    return sorted(path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in SOURCE_EXTENSIONS)
+    return sorted(path for path in root.rglob("*") if path.is_file())
 
 
 def is_comment_or_blank(line: str) -> bool:
@@ -179,24 +211,259 @@ def process_file(path: Path, apply_changes: bool) -> bool:
     return True
 
 
-def run_once(root: Path, apply_changes: bool) -> list[Path]:
+def run_once(
+    root: Path,
+    apply_changes: bool,
+    on_log: callable | None = None,
+    on_progress: callable | None = None,
+    labels: dict[str, str] | None = None,
+) -> RunReport:
+    labels = labels or DEFAULT_LABELS
     files = iter_source_files(root)
-    changed_files = [path for path in files if process_file(path, apply_changes=apply_changes)]
-    mode = "APPLY" if apply_changes else "CHECK"
-    action = "updated" if apply_changes else "would update"
-    print(f"[{mode}] root: {root.resolve()}")
-    print(f"[{mode}] scanned source files: {len(files)}")
-    print(f"[{mode}] {action} {len(changed_files)} file(s)")
-    for path in changed_files:
-        print(path.as_posix())
-    return changed_files
+    total = len(files)
+    changed_files: list[Path] = []
+    mode = labels["apply_mode"] if apply_changes else labels["check_mode"]
+    action = labels["updated"] if apply_changes else labels["would_update"]
+    start = time.perf_counter()
+
+    def log(msg: str) -> None:
+        if on_log is None:
+            print(msg)
+        else:
+            on_log(msg)
+
+    log(f"[{mode}] {labels['root']}: {root.resolve()}")
+    log(f"[{mode}] {labels['scanned']}: {total}")
+
+    for idx, path in enumerate(files, start=1):
+        if process_file(path, apply_changes=apply_changes):
+            changed_files.append(path)
+            log(path.as_posix())
+        if on_progress is not None:
+            on_progress(idx, total)
+
+    log(f"[{mode}] {action} {len(changed_files)} {labels['files']}")
+    duration = time.perf_counter() - start
+    return RunReport(
+        root=root,
+        total_files=total,
+        changed_files=changed_files,
+        apply_changes=apply_changes,
+        duration_sec=duration,
+    )
+
+
+def launch_gui() -> None:
+    import tkinter as tk
+    from tkinter import filedialog, font as tkfont, messagebox, scrolledtext, ttk
+
+    class GuiApp:
+        def __init__(self) -> None:
+            self.root = tk.Tk()
+            self.root.title("RTL 头注释处理工具")
+            self.root.geometry("820x560")
+            self.root.minsize(720, 520)
+            self.root.configure(bg="#f4f2ee")
+
+            default_font = tkfont.nametofont("TkDefaultFont")
+            default_font.configure(family="Microsoft YaHei", size=10)
+            self.root.option_add("*Font", default_font)
+
+            style = ttk.Style(self.root)
+            style.theme_use("clam")
+            style.configure("TButton", padding=(10, 6))
+            style.configure("TCheckbutton", padding=(6, 4))
+            style.configure("TLabel", background="#f4f2ee")
+            style.configure("Header.TLabel", font=("Microsoft YaHei", 14, "bold"))
+
+            self.queue: queue.Queue[tuple[str, object]] = queue.Queue()
+            self.worker_thread: threading.Thread | None = None
+            self.apply_mode = tk.BooleanVar(value=True)
+            self.verify_mode = tk.BooleanVar(value=True)
+            self.dir_var = tk.StringVar(value=str(Path("rtl").resolve()))
+            self.progress_var = tk.IntVar(value=0)
+            self.progress_total = 0
+            self.status_var = tk.StringVar(value="空闲。")
+
+            self._build_ui()
+            self.root.after(100, self._poll_queue)
+
+        def _build_ui(self) -> None:
+            header = tk.Frame(self.root, bg="#f4f2ee")
+            header.pack(fill=tk.X, pady=(10, 0))
+            ttk.Label(header, text="RTL 头注释处理工具", style="Header.TLabel").pack(anchor=tk.W, padx=12)
+            tk.Label(header, text="支持目录选择、确认、进度显示、日志与报告", bg="#f4f2ee").pack(
+                anchor=tk.W, padx=12, pady=(2, 6)
+            )
+
+            top = ttk.Frame(self.root, padding=10)
+            top.pack(fill=tk.X)
+
+            ttk.Label(top, text="目标目录：").pack(side=tk.LEFT)
+            entry = ttk.Entry(top, textvariable=self.dir_var)
+            entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+            ttk.Button(top, text="浏览…", command=self._browse).pack(side=tk.LEFT)
+
+            options = ttk.Frame(self.root, padding=10)
+            options.pack(fill=tk.X)
+            ttk.Checkbutton(options, text="写回修改", variable=self.apply_mode).pack(side=tk.LEFT)
+            ttk.Checkbutton(options, text="写回后复测", variable=self.verify_mode).pack(side=tk.LEFT, padx=12)
+            ttk.Button(options, text="开始", command=self._start).pack(side=tk.RIGHT)
+
+            progress_frame = ttk.Frame(self.root, padding=10)
+            progress_frame.pack(fill=tk.X)
+            self.progress = ttk.Progressbar(progress_frame, maximum=100)
+            self.progress.pack(fill=tk.X)
+            ttk.Label(progress_frame, textvariable=self.status_var).pack(anchor=tk.W, pady=6)
+
+            log_frame = ttk.Frame(self.root, padding=10)
+            log_frame.pack(fill=tk.BOTH, expand=True)
+            self.log_widget = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, height=16)
+            self.log_widget.pack(fill=tk.BOTH, expand=True)
+            self.log_widget.configure(state=tk.DISABLED)
+
+        def _browse(self) -> None:
+            directory = filedialog.askdirectory(initialdir=self.dir_var.get())
+            if directory:
+                self.dir_var.set(directory)
+
+        def _start(self) -> None:
+            if self.worker_thread and self.worker_thread.is_alive():
+                return
+            target = Path(self.dir_var.get())
+            if not target.exists() or not target.is_dir():
+                messagebox.showerror("目录无效", "请选择有效的目录。")
+                return
+            if not self.apply_mode.get():
+                self.verify_mode.set(False)
+            mode_label = "写回修改" if self.apply_mode.get() else "仅检查"
+            confirm = messagebox.askyesno(
+                "确认",
+                f"目标目录：{target}\n模式：{mode_label}\n\n是否继续？",
+            )
+            if not confirm:
+                self._log("用户已取消。")
+                return
+            self._set_running(True)
+            self.progress_var.set(0)
+            self.progress_total = 0
+            self.status_var.set("开始处理...")
+            self._log("------------------------------------------------------------")
+            self._log(f"目标目录：{target}")
+            self._log(f"处理模式：{mode_label}")
+            self._log("------------------------------------------------------------")
+            self.worker_thread = threading.Thread(target=self._run_worker, args=(target,), daemon=True)
+            self.worker_thread.start()
+
+        def _run_worker(self, target: Path) -> None:
+            try:
+                self.queue.put(("phase", "apply" if self.apply_mode.get() else "check"))
+                report_apply = run_once(
+                    target,
+                    apply_changes=self.apply_mode.get(),
+                    on_log=lambda msg: self.queue.put(("log", msg)),
+                    on_progress=lambda i, t: self.queue.put(("progress", (i, t))),
+                    labels=CHINESE_LABELS,
+                )
+                report_check = None
+                if self.apply_mode.get() and self.verify_mode.get():
+                    self.queue.put(("phase", "verify"))
+                    report_check = run_once(
+                        target,
+                        apply_changes=False,
+                        on_log=lambda msg: self.queue.put(("log", msg)),
+                        on_progress=lambda i, t: self.queue.put(("progress", (i, t))),
+                        labels=CHINESE_LABELS,
+                    )
+                self.queue.put(("done", (report_apply, report_check)))
+            except Exception as exc:  # pragma: no cover - GUI only
+                self.queue.put(("error", str(exc)))
+
+        def _poll_queue(self) -> None:
+            try:
+                while True:
+                    event, payload = self.queue.get_nowait()
+                    if event == "log":
+                        self._log(str(payload))
+                    elif event == "progress":
+                        current, total = payload
+                        if total > 0:
+                            self.progress_total = total
+                            self.progress.configure(maximum=total)
+                            self.progress_var.set(current)
+                            self.progress.configure(value=current)
+                        self.status_var.set(f"正在处理 {current}/{total} 个文件...")
+                    elif event == "phase":
+                        phase = payload
+                        self.progress_var.set(0)
+                        if phase == "verify":
+                            self.status_var.set("复测中...")
+                        else:
+                            self.status_var.set("正在处理文件...")
+                    elif event == "done":
+                        report_apply, report_check = payload
+                        self._finish(report_apply, report_check)
+                    elif event == "error":
+                        self._log(f"[ERROR] {payload}")
+                        messagebox.showerror("Error", str(payload))
+                        self._set_running(False)
+            except queue.Empty:
+                pass
+            self.root.after(100, self._poll_queue)
+
+        def _finish(self, report_apply: RunReport, report_check: RunReport | None) -> None:
+            summary_lines = [
+                "------------------------------------------------------------",
+                "处理报告",
+                f"目标目录：{report_apply.root}",
+                f"处理模式：{'写回' if report_apply.apply_changes else '检查'}",
+                f"扫描文件数：{report_apply.total_files}",
+                f"命中文件数：{len(report_apply.changed_files)}",
+                f"耗时：{report_apply.duration_sec:.2f}s",
+            ]
+            if report_check is not None:
+                summary_lines.extend(
+                    [
+                        "复测结果：",
+                        f"命中文件数：{len(report_check.changed_files)}",
+                        f"耗时：{report_check.duration_sec:.2f}s",
+                    ]
+                )
+            summary_lines.append("------------------------------------------------------------")
+            for line in summary_lines:
+                self._log(line)
+            messagebox.showinfo("处理报告", "\n".join(summary_lines))
+            self.status_var.set("处理完成。")
+            self._set_running(False)
+
+        def _log(self, msg: str) -> None:
+            self.log_widget.configure(state=tk.NORMAL)
+            self.log_widget.insert(tk.END, msg + "\n")
+            self.log_widget.see(tk.END)
+            self.log_widget.configure(state=tk.DISABLED)
+
+        def _set_running(self, running: bool) -> None:
+            for child in self.root.winfo_children():
+                for widget in child.winfo_children():
+                    if isinstance(widget, ttk.Button) or isinstance(widget, ttk.Checkbutton) or isinstance(widget, ttk.Entry):
+                        widget.configure(state=tk.DISABLED if running else tk.NORMAL)
+
+        def run(self) -> None:
+            self.root.mainloop()
+
+    GuiApp().run()
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Normalize RTL file headers.")
     parser.add_argument("root", nargs="?", default="rtl", help="Root directory to process.")
     parser.add_argument("--apply", action="store_true", help="Write changes in place.")
+    parser.add_argument("--gui", action="store_true", help="Launch GUI.")
     args = parser.parse_args()
+
+    if args.gui:
+        launch_gui()
+        return 0
 
     root = Path(args.root)
     run_once(root, apply_changes=args.apply)
