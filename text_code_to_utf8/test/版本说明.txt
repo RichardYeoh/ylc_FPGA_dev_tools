@@ -1,0 +1,53 @@
+scm_cam_v1.2_20240531bak.rar 为 scm_cam_v1.2 导入后的备份
+调试中使用 scm_cam_v2 修改内容为：
+20240531 ： 集成 scm 6678 启动配置；
+                 因bufg资源不够，将db中暂时不用的120m和50m改为bufh，scm_boot_basic使用原语，将其中DSP_25M_IN使用bufh
+                                 将cam解码中的bufg改为bufh和bufio
+                                 
+                                 改后一直报错误，pcie时钟接口无法实现
+                                 
+scm_cam_v1.3 ： 基于  scm_cam_v1.2 原配置进行修改 将cam解码CAM_QS_DEC的sample clk 改为BUFIO ， 
+                                                           cam_zm_chk中的sample clk 改为bufio。
+                                                           可以实现
+                                   sample clk 可配置成 BUFIO, BUF_H, BUF_G
+                                   pixel clk  可配置成 BUF_R, BUF_H, BUF_G
+
+
+scm_cam_v1.4 ： 基于  scm_cam_v1.3 删除 冗余 cam接口，先保证srio实现。 删除 cam_zm 解码模块， 其他cam设为 buf_g 可以实现
+
+scm_cam_v2.1 ： 基于  scm_cam_v1.4 合入scm 6678 启动配置；
+
+scm_cam_v2.2 ： 基于  scm_cam_v2.1 开放ID号配置； 经咨询，对于不过交换网络的SRIO应用，发送端（FPGA）的ID 号不敏感，可不改
+                                                          如需更改也可以使用对端写寄存器更改。
+
+scm_cam_v2.4 ： 基于  scm_cam_v1.4  合入scm 6678 启动配置；开放ID号配置，ID号改为0x11和0x99；
+
+scm_cam_v2.5 ： 基于  scm_cam_v2.4  更改srio自身id，新建cam_to_srio_id_30作为XS srio，id号为0x30，
+                                                              原cam_to_srio改为8位id，仅应用于QS，id号为0x31；
+                                                             新增初始化配置CPU2DSP_INT1=1——6678由spi启动
+
+scm_cam_v2.5.1 ： 基于  scm_cam_v2.5  为验证第二路srio， 改xdc，将目前的srio1引到srio2上做通道测试。
+
+scm_cam_v2.6 ： 基于  scm_cam_v2.5  将cam_zm加回工程
+
+scm_cam_v2.6.1 ： 基于  scm_cam_v2.6  因飞线，修改xdc
+
+scm_cam_v2.5.2 ： 基于  scm_cam_v2.5.1  修改配置管脚连接，A33OUT = A18IN; A18OUT = A33IN;  DSP_UART_RXD_OUT接Y25。
+
+scm_cam_v2.6.1_xdma_dbg ： 基于  scm_cam_v2.6.1 加入 xdma axilite 接口debug
+
+20240828 scm_cam_v2.6.2_xdma_dbg ： 基于 scm_cam_v2.6.1_xdma_dbg 移除 2.6.1 的飞线XDC修改（AG29） 加入新io控制需求。
+                                                                  已调试，PCIE dma已通。视频数据未写入。
+
+20240902 scm_cam_v2.6.3_dbg ： 基于 scm_cam_v2.6.2_xdma_dbg 加入cam到xdma通路视频debug。发现复位信号连接错误，修正复位信号已解决
+
+另：发现bug xdma交互中0x4，0x8控制寄存器应在最后一行（1025添加行）上报有效和行数，但代码未作特殊处理，仍按照1024写入。
+实际写入即为64（0x40），128（0x80），192（0xC0）…… 1024（0x400）。
+注意：bar0的BMG的配置为 BRAM Controller 其addr总线为字节寻址总线。
+          
+20240902 scm_cam_v2.6.4_dbg ： 调试出现图像偏斜，此版本基于 scm_cam_v2.6.3_dbg 向数据通道写入address的可控数据 以判断数据传输问题。
+                                                        再次改为仿真vesa源进行数据传输判断。
+经测试，逻辑设计正确，驱动存在bug，已修复。
+20241009 scm_cam_v2.7 ： 基于 scm_cam_v2.6.3_dbg 去除debug， 出正式版本。
+
+
