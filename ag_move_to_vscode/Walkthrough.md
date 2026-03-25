@@ -1,33 +1,90 @@
 # Walkthrough
 
-## 本次新增内容
+## 当前推荐模式
 
-- 增加了 `执行Antigravity迁移到VSCode.ps1`
-- 增加了 `可自动完成程度评估.md`
-- 保留了原先的 `Antigravity迁移到VSCode完整指南.md`
+当前脚本已经改成“轻量配置模式”为主：
 
-## 推荐你先看的顺序
+- 插件安装以 `手动处理` 为主
+- 配置迁移以 `一键处理` 为主
+- 默认不复制整包扩展目录
+- 默认不备份整包扩展目录
 
-1. 先看 `可自动完成程度评估.md`
-2. 再看 `Antigravity迁移到VSCode完整指南.md`
-3. 最后决定是否执行 `执行Antigravity迁移到VSCode.ps1`
+这样做的目标是：
 
-## 推荐执行方式
+- 避免再生成 GB 级临时目录
+- 保留配置一键迁移的便利性
+- 把插件选择权留给你自己
 
-先做一次只生成迁移包、不改 VS Code 配置的试运行：
+## 推荐执行顺序
 
-```powershell
-.\\执行Antigravity迁移到VSCode.ps1
-```
-
-确认输出无误后，再执行真实配置复制：
+1. 先执行一次默认 dry-run：
 
 ```powershell
-.\\执行Antigravity迁移到VSCode.ps1 -ApplyConfig -GenerateExtensionInstallScript
+.\执行Antigravity迁移到VSCode.ps1
 ```
 
-## 我对“能不能帮你做完”的判断
+2. 打开生成目录中的：
+   - `Migration_Summary.md`
+   - `Settings_Migration_Report.md`
+   - `VSCode_Extensions_Manual_Install.md`
 
-- 能完成大部分
-- 不能保证 100% 原样复制 Antigravity 专有能力
-- 如果你允许我继续执行到真实用户目录层面，我可以继续把迁移往前推进
+3. 在 VS Code 中手动安装你真正需要的插件
+4. 执行生成目录中的 `preview_staged_vscode.ps1`
+5. 在预览环境中打开 FPGA 工程，检查：
+   - Verilog/SystemVerilog 高亮
+   - formatter
+   - snippets
+   - 中文界面
+   - PowerShell / Scala / Python 扩展
+   - Codex / ChatGPT 工作流
+
+6. 确认预览效果可接受后，再执行真实写入：
+
+```powershell
+.\执行Antigravity迁移到VSCode.ps1 -ApplyConfig
+```
+
+## 如果你以后又想批量装插件
+
+可以额外生成安装脚本：
+
+```powershell
+.\执行Antigravity迁移到VSCode.ps1 -GenerateExtensionInstallScript
+```
+
+它会给你：
+
+- `install_gallery_extensions.ps1`
+- `Manual_VSIX_Extensions.md`
+
+但默认工作流仍然建议你手动安装插件。
+
+## 这版脚本会做什么
+
+- 备份最小必要配置
+  - `settings.json`
+  - `keybindings.json`
+  - `snippets`
+  - `extensions.json`
+- 生成清洗后的 staged `settings.json`
+- 自动移除 `agCockpit.*`
+- 对仍指向 Antigravity 的 Verible 路径给出审查提示
+- 对 `mshr-h.veriloghdl` 缺失问题给出审查提示
+- 生成手动插件安装清单
+
+## 这版脚本默认不会做什么
+
+- 不会默认复制 Antigravity 扩展目录
+- 不会默认备份 VS Code 扩展目录
+- 不会默认联网安装扩展
+- 不会默认改写真实 VS Code 用户目录
+
+## 仅在你明确要求时才建议启用的模式
+
+如果你以后确实要研究“完整复制扩展目录”的效果，可以显式加：
+
+```powershell
+.\执行Antigravity迁移到VSCode.ps1 -IncludeExtensionArtifacts
+```
+
+但这不是当前推荐路径，因为它会重新带来大体积目录和更高的不确定性。
