@@ -1,0 +1,46 @@
+{
+    "workbench.iconTheme": "material-icon-theme",
+    "[systemverilog]": {
+        "editor.defaultFormatter": "AndrewNolte.vscode-system-verilog"
+    },
+    "[verilog]": {
+        "editor.defaultFormatter": "mshr-h.veriloghdl"
+    },
+    "editor.defaultFormatter": "mshr-h.veriloghdl",
+    "editor.tabSize": 3,
+    "files.watcherExclude": {
+        "**/.bloop": true,
+        "**/.metals": true
+    },
+    "security.workspace.trust.untrustedFiles": "open",
+    "editor.tabCompletion": "on",
+
+    // ============================================
+    // mshr-h.veriloghdl 扩展配置 (使用 "linting")
+    // ============================================
+    "verilog.linting.linter": "verilator",
+    "verilog.linting.verilator.path": "D:\\msys64\\ucrt64\\bin\\verilator_bin.exe",
+    "verilog.linting.verilator.arguments": "--lint-only -Wall -Wno-fatal",
+    "verilog.linting.iverilog.arguments": "-Wall",
+    "verilog.ctags.path": "D:\\Program Files\\ctags-v6.0.0-clang-x64\\ctags.exe",
+
+    // mshr-h 格式化配置
+    "verilog.formatting.verilogHDL.formatter": "verible-verilog-format",
+    "verilog.formatting.systemVerilog.formatter": "verible-verilog-format",
+    "verilog.formatting.veribleVerilogFormatter.path": "C:\\Users\\liche\\AppData\\Local\\Programs\\Antigravity\\bin\\verible-verilog-format.exe",
+    "verilog.formatting.veribleVerilogFormatter.arguments": "--indentation_spaces=4",
+
+    // ============================================
+    // Andrew Nolte 扩展配置 (使用 "lint" - 注意没有 "ing")
+    // 这是导致 slang.exe not found 错误的扩展!
+    // ============================================
+    "verilog.lint.slang.enabled": false,
+    "agCockpit.groupingEnabled": true,
+    "agCockpit.statusBarFormat": "standard",
+    "git.ignoreMissingGitWarning": true,
+    "[scala]": {
+        "editor.defaultFormatter": "scalameta.metals"
+    },
+    "terminal.integrated.defaultProfile.windows": "Command Prompt",
+    "editor.columnSelection": true
+}

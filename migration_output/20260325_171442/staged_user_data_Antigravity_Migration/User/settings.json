@@ -1,0 +1,48 @@
+{
+    "workbench.iconTheme": "material-icon-theme",
+    "[systemverilog]": {
+        "editor.defaultFormatter": "AndrewNolte.vscode-system-verilog"
+    },
+    "[verilog]": {
+        // REVIEW: formatter extension mshr-h.veriloghdl was not found in the current Antigravity extension inventory / 当前 Antigravity 扩展清单未发现该 formatter 扩展
+        "editor.defaultFormatter": "mshr-h.veriloghdl"
+    },
+    // REVIEW: formatter extension mshr-h.veriloghdl was not found in the current Antigravity extension inventory / 当前 Antigravity 扩展清单未发现该 formatter 扩展
+    "editor.defaultFormatter": "mshr-h.veriloghdl",
+    "editor.tabSize": 3,
+    "files.watcherExclude": {
+        "**/.bloop": true,
+        "**/.metals": true
+    },
+    "security.workspace.trust.untrustedFiles": "open",
+    "editor.tabCompletion": "on",
+
+    // ============================================
+    // mshr-h.veriloghdl 扩展配置 (使用 "linting")
+    // ============================================
+    "verilog.linting.linter": "verilator",
+    "verilog.linting.verilator.path": "D:\\msys64\\ucrt64\\bin\\verilator_bin.exe",
+    "verilog.linting.verilator.arguments": "--lint-only -Wall -Wno-fatal",
+    "verilog.linting.iverilog.arguments": "-Wall",
+    "verilog.ctags.path": "D:\\Program Files\\ctags-v6.0.0-clang-x64\\ctags.exe",
+
+    // mshr-h 格式化配置
+    "verilog.formatting.verilogHDL.formatter": "verible-verilog-format",
+    "verilog.formatting.systemVerilog.formatter": "verible-verilog-format",
+    "verilog.formatting.veribleVerilogFormatter.path": "C:\\Users\\liche\\.vscode\\extensions\\bmpenuelas.systemverilog-formatter-vscode-3.4.1\\verible_release\\win64.zip\\verible-v0.0-3969-g6a70680a-win64\\bin\\verible-verilog-format.exe",
+    "verilog.formatting.veribleVerilogFormatter.arguments": "--indentation_spaces=4",
+
+    // ============================================
+    // Andrew Nolte 扩展配置 (使用 "lint" - 注意没有 "ing")
+    // 这是导致 slang.exe not found 错误的扩展!
+    // ============================================
+    "verilog.lint.slang.enabled": false,
+    // Removed during migration because VS Code does not use this Antigravity-only setting / 迁移时移除，VS Code 不使用该 Antigravity 专有设置: agCockpit.groupingEnabled
+    // Removed during migration because VS Code does not use this Antigravity-only setting / 迁移时移除，VS Code 不使用该 Antigravity 专有设置: agCockpit.statusBarFormat
+    "git.ignoreMissingGitWarning": true,
+    "[scala]": {
+        "editor.defaultFormatter": "scalameta.metals"
+    },
+    "terminal.integrated.defaultProfile.windows": "Command Prompt",
+    "editor.columnSelection": true
+}

@@ -1,0 +1,16 @@
+{
+    "git.path": "D:\\Program Files\\Git\\cmd\\git.exe",
+    "claudeCode.preferredLocation": "panel",
+    "security.workspace.trust.untrustedFiles": "open",
+    "workbench.iconTheme": "vscode-icons",
+
+    // Verilog/SystemVerilog Lint Configuration (mshr-h extension)
+    // 浣跨敤 iverilog 浣滀负 lint 鍚庣锛岀洿鎺ユ寚瀹氬畬鏁磋矾寰勭粫杩?PATH 闂
+    "verilog.linting.linter": "iverilog",
+    "verilog.linting.iverilog.path": "D:\\iverilog\\bin\\iverilog.exe",
+    "verilog.linting.iverilog.arguments": "-g2012",
+    "verilog.linting.iverilog.runAtFileLocation": true,
+
+    "verilog.ctags.path": "D:\\Program Files\\ctags-v6.0.0-clang-x64\\ctags.exe",
+    "git.autofetch": true
+}
