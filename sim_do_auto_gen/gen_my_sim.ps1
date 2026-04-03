@@ -1,10 +1,12 @@
-﻿param(
-  [string]$QuestaDir = "",
-  [string]$OutDoName = "my_sim.do",
-  [string]$OutBatName = "my_sim.bat"
+param(
+  [Alias("QuestaDir")][string]$SimulatorDir = "",
+  [string]$OutTclName = "my_sim.tcl",
+  [string]$OutBatName = "my_sim.bat",
+  [switch]$NoUi
 )
 
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 
 function Write-Utf8NoBomFile {
   param(
@@ -13,12 +15,74 @@ function Write-Utf8NoBomFile {
   )
 
   $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-  $text = ($Lines -join "`r`n") + "`r`n"
+  $text = (($Lines -join "`r`n").TrimEnd("`r", "`n")) + "`r`n"
   [System.IO.File]::WriteAllText($Path, $text, $utf8NoBom)
 }
 
+function Read-Utf8TextFile {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $reader = New-Object System.IO.StreamReader($Path, $true)
+  try {
+    return $reader.ReadToEnd()
+  }
+  finally {
+    $reader.Dispose()
+  }
+}
+
+function Read-Utf8Lines {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $text = Read-Utf8TextFile -Path $Path
+  if ([string]::IsNullOrEmpty($text)) {
+    return @()
+  }
+
+  $lines = [System.Text.RegularExpressions.Regex]::Split($text, "\r\n|\n")
+  if ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq "") {
+    return $lines[0..($lines.Count - 2)]
+  }
+
+  return $lines
+}
+
+function Write-GenerationLog {
+  param(
+    [Parameter(Mandatory = $true)][string]$Message,
+    [object]$LogBox = $null
+  )
+
+  $entry = "[{0}] {1}" -f (Get-Date).ToString("HH:mm:ss"), $Message
+  Write-Host $entry
+
+  if ($null -eq $LogBox) {
+    return
+  }
+
+  $appendAction = {
+    param($TargetBox, $TargetEntry)
+
+    if ([string]::IsNullOrWhiteSpace($TargetBox.Text)) {
+      $TargetBox.Text = $TargetEntry
+    }
+    else {
+      $TargetBox.AppendText([Environment]::NewLine + $TargetEntry)
+    }
+    $TargetBox.SelectionStart = $TargetBox.TextLength
+    $TargetBox.ScrollToCaret()
+  }
+
+  if ($LogBox.InvokeRequired) {
+    $LogBox.Invoke($appendAction, $LogBox, $entry) | Out-Null
+  }
+  else {
+    & $appendAction $LogBox $entry
+  }
+}
+
 function Resolve-ExistingWaveBlock {
-  param([string]$MySimDoPath)
+  param([string]$MySimTclPath)
 
   $defaultBlock = @(
     "#user wave-watch add here",
@@ -26,18 +90,20 @@ function Resolve-ExistingWaveBlock {
     "#user wave-watch add here end"
   )
 
-  if (-not (Test-Path -LiteralPath $MySimDoPath)) {
+  if (-not (Test-Path -LiteralPath $MySimTclPath)) {
     return $defaultBlock
   }
 
-  $lines = Get-Content -LiteralPath $MySimDoPath
+  $lines = Read-Utf8Lines -Path $MySimTclPath
   $start = -1
   $end = -1
+
   for ($i = 0; $i -lt $lines.Count; $i++) {
     if ($start -lt 0 -and $lines[$i] -match "^\s*#user wave-watch add here\s*$") {
       $start = $i
       continue
     }
+
     if ($start -ge 0 -and $lines[$i] -match "^\s*#user wave-watch add here end\s*$") {
       $end = $i
       break
@@ -51,15 +117,50 @@ function Resolve-ExistingWaveBlock {
   return $defaultBlock
 }
 
+function Resolve-WaveBlockWithFallback {
+  param(
+    [Parameter(Mandatory = $true)][string]$PrimaryTclPath,
+    [string[]]$FallbackTclPaths = @()
+  )
+
+  $primaryBlock = Resolve-ExistingWaveBlock -MySimTclPath $PrimaryTclPath
+  $defaultBlock = @(
+    "#user wave-watch add here",
+    "# add wave -position insertpoint sim:/<tb>/<path>/*",
+    "#user wave-watch add here end"
+  )
+
+  if (($primaryBlock -join "`n") -ne ($defaultBlock -join "`n")) {
+    return $primaryBlock
+  }
+
+  foreach ($fallbackPath in $FallbackTclPaths) {
+    if ([string]::IsNullOrWhiteSpace($fallbackPath)) {
+      continue
+    }
+
+    if (-not (Test-Path -LiteralPath $fallbackPath)) {
+      continue
+    }
+
+    $fallbackBlock = Resolve-ExistingWaveBlock -MySimTclPath $fallbackPath
+    if (($fallbackBlock -join "`n") -ne ($defaultBlock -join "`n")) {
+      return $fallbackBlock
+    }
+  }
+
+  return $primaryBlock
+}
+
 function Resolve-ExistingRunLine {
-  param([string]$MySimDoPath)
+  param([string]$MySimTclPath)
 
   $defaultRun = "run 100ms"
-  if (-not (Test-Path -LiteralPath $MySimDoPath)) {
+  if (-not (Test-Path -LiteralPath $MySimTclPath)) {
     return $defaultRun
   }
 
-  $line = Get-Content -LiteralPath $MySimDoPath | Where-Object { $_ -match "^\s*run\s+\S+" } | Select-Object -Last 1
+  $line = Read-Utf8Lines -Path $MySimTclPath | Where-Object { $_ -match "^\s*run\s+\S+" } | Select-Object -Last 1
   if ([string]::IsNullOrWhiteSpace($line)) {
     return $defaultRun
   }
@@ -67,226 +168,495 @@ function Resolve-ExistingRunLine {
   return $line.Trim()
 }
 
-function Resolve-DefaultQuestaDir {
-  param([string]$ScriptDir)
+function Get-SimulatorContext {
+  param([Parameter(Mandatory = $true)][string]$SimulatorDir)
 
-  # Expected location:
-  #   <proj>.srcs\sim_1\sim_do_auto_gen\gen_my_sim.ps1
-  # Try to infer:
-  #   <proj>.sim\sim_1\behav\questa
-  $sim1Dir = (Resolve-Path (Join-Path $ScriptDir "..")).Path
-  $srcsDir = (Resolve-Path (Join-Path $sim1Dir "..")).Path
-  $workRoot = Split-Path -Parent $srcsDir
-  $srcsName = Split-Path -Leaf $srcsDir
-
-  $candidateDirs = @()
-
-  if ($srcsName -like "*.srcs") {
-    $projName = $srcsName.Substring(0, $srcsName.Length - 5)
-    if (-not [string]::IsNullOrWhiteSpace($projName)) {
-      $candidateDirs += Join-Path $workRoot ("{0}.sim\sim_1\behav\questa" -f $projName)
-    }
+  if ([string]::IsNullOrWhiteSpace($SimulatorDir)) {
+    throw "请选择有效的 questa/modelsim 目录。"
   }
 
-  $candidateDirs += Get-ChildItem -LiteralPath $workRoot -Directory -Filter "*.sim" |
-    ForEach-Object { Join-Path $_.FullName "sim_1\behav\questa" }
+  if (-not (Test-Path -LiteralPath $SimulatorDir)) {
+    throw "目录不存在: $SimulatorDir"
+  }
 
-  $existing = @(
-    $candidateDirs |
-    Select-Object -Unique |
-    Where-Object { Test-Path -LiteralPath $_ }
+  $resolvedDir = (Resolve-Path -LiteralPath $SimulatorDir).Path
+  $compileCandidates = @(
+    Get-ChildItem -LiteralPath $resolvedDir -File -Filter "*_compile.do" |
+      Sort-Object LastWriteTime -Descending
   )
 
-  if ($existing.Count -eq 0) {
-    throw "Cannot auto-detect Questa directory. Please pass -QuestaDir explicitly."
+  if ($compileCandidates.Count -eq 0) {
+    throw "目标目录中未找到 '*_compile.do'：$resolvedDir"
   }
 
-  if ($existing.Count -eq 1) {
-    return $existing[0]
-  }
+  $compileDo = $compileCandidates[0]
+  $baseName = $compileDo.BaseName -replace "_compile$", ""
+  $elaborateDo = Join-Path $resolvedDir ($baseName + "_elaborate.do")
+  $simulateDo = Join-Path $resolvedDir ($baseName + "_simulate.do")
+  $simulateBat = Join-Path $resolvedDir "simulate.bat"
 
-  # Prefer the candidate derived from sibling '<proj>.srcs' -> '<proj>.sim'
-  if ($srcsName -like "*.srcs") {
-    $projName = $srcsName.Substring(0, $srcsName.Length - 5)
-    $preferred = Join-Path $workRoot ("{0}.sim\sim_1\behav\questa" -f $projName)
-    if (Test-Path -LiteralPath $preferred) {
-      return $preferred
+  foreach ($requiredPath in @($elaborateDo, $simulateDo, $simulateBat)) {
+    if (-not (Test-Path -LiteralPath $requiredPath)) {
+      throw "缺少必须文件: $requiredPath"
     }
   }
 
-  # Fallback: choose the most recently updated candidate.
-  $latest = $existing |
-    ForEach-Object { Get-Item -LiteralPath $_ } |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 1
-  return $latest.FullName
-}
+  $outputDir = Split-Path -Parent $resolvedDir
+  $simLeafName = Split-Path -Leaf $resolvedDir
 
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-
-if ([string]::IsNullOrWhiteSpace($QuestaDir)) {
-  $QuestaDir = Resolve-DefaultQuestaDir -ScriptDir $scriptDir
-}
-
-if (-not (Test-Path -LiteralPath $QuestaDir)) {
-  throw "Questa directory does not exist: $QuestaDir"
-}
-
-$QuestaDir = (Resolve-Path $QuestaDir).Path
-
-$compileCandidates = Get-ChildItem -LiteralPath $QuestaDir -File -Filter "*_compile.do" | Sort-Object LastWriteTime -Descending
-if ($compileCandidates.Count -eq 0) {
-  throw "No '*_compile.do' found in: $QuestaDir"
-}
-
-$compileDo = $compileCandidates[0]
-$baseName = $compileDo.BaseName -replace "_compile$", ""
-$elaborateDo = Join-Path $QuestaDir ($baseName + "_elaborate.do")
-$simulateDo = Join-Path $QuestaDir ($baseName + "_simulate.do")
-$simulateBat = Join-Path $QuestaDir "simulate.bat"
-
-foreach ($f in @($elaborateDo, $simulateDo, $simulateBat)) {
-  if (-not (Test-Path -LiteralPath $f)) {
-    throw "Required file not found: $f"
+  return [pscustomobject]@{
+    SimulatorDir    = $resolvedDir
+    SimulatorLeaf   = $simLeafName
+    OutputDir       = $outputDir
+    CompileDo       = $compileDo.FullName
+    CompileDoName   = $compileDo.Name
+    ElaborateDo     = $elaborateDo
+    ElaborateDoName = [System.IO.Path]::GetFileName($elaborateDo)
+    SimulateDo      = $simulateDo
+    SimulateDoName  = [System.IO.Path]::GetFileName($simulateDo)
+    SimulateBat     = $simulateBat
   }
 }
 
-$outDoPath = Join-Path $QuestaDir $OutDoName
-$outBatPath = Join-Path $QuestaDir $OutBatName
+function Get-FilteredCompileLines {
+  param([Parameter(Mandatory = $true)][string]$Path)
 
-$waveBlock = Resolve-ExistingWaveBlock -MySimDoPath $outDoPath
-$runLine = Resolve-ExistingRunLine -MySimDoPath $outDoPath
-
-$compileLines = Get-Content -LiteralPath $compileDo.FullName | Where-Object { $_ -notmatch "^\s*quit\s+-force\s*$" }
-$elaborateBody = Get-Content -LiteralPath $elaborateDo | Where-Object {
-  $_ -notmatch "^\s*$" -and
-  $_ -notmatch "^\s*#" -and
-  $_ -notmatch "^\s*quit\s+-force\s*$"
+  return @(
+    Read-Utf8Lines -Path $Path |
+      Where-Object { $_ -notmatch "^\s*quit\s+-force(?:\s+-code\s+\d+)?\s*$" }
+  )
 }
 
-$simulateBody = @()
-foreach ($line in (Get-Content -LiteralPath $simulateDo)) {
-  if ($line -match "^\s*$") { continue }
-  if ($line -match "^\s*#") { continue }
-  if ($line -match "^\s*quit\s+-force\s*$") { continue }
-  if ($line -match "^\s*do\s+\{.*_wave\.do\}\s*$") { continue }
-  if ($line -match "^\s*do\s+\{.*\.udo\}\s*$") { continue }
-  if ($line -match "^\s*run\s+\S+") { continue }
-  if ($line -match "^\s*view\s+\S+") { continue }
-  $simulateBody += $line
+function Get-FilteredElaborateLines {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  return @(
+    Read-Utf8Lines -Path $Path |
+      Where-Object {
+        $_ -notmatch "^\s*$" -and
+        $_ -notmatch "^\s*#" -and
+        $_ -notmatch "^\s*quit\s+-force(?:\s+-code\s+\d+)?\s*$"
+      }
+  )
 }
 
-$created = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss zzz")
-$compileDoName = [System.IO.Path]::GetFileName($compileDo.FullName)
-$elaborateDoName = [System.IO.Path]::GetFileName($elaborateDo)
-$simulateDoName = [System.IO.Path]::GetFileName($simulateDo)
+function Get-FilteredSimulateLines {
+  param([Parameter(Mandatory = $true)][string]$Path)
 
-$outDoLines = @(
-  "######################################################################",
-  "#",
-  "# File name : $OutDoName",
-  "# Created on: $created",
-  "#",
-  "# EN: Auto merged from $compileDoName, $elaborateDoName, $simulateDoName",
-  "# CN: 自动合并来源为 $compileDoName, $elaborateDoName, $simulateDoName",
-  "# EN: Generated by gen_my_sim.ps1 and overwritten on each rerun.",
-  "# CN: 由 gen_my_sim.ps1 生成，每次重新运行都会覆盖同名输出文件。",
-  "#",
-  "######################################################################",
-  "",
-  "######################################################################",
-  "# EN: Section A - Compile and library setup.",
-  "# CN: 段A - 编译与库映射配置。",
-  "# EN: Source = $compileDoName (copied as-is except trailing 'quit -force').",
-  "# CN: 来源 = $compileDoName（基本原样复制，仅去掉末尾 'quit -force'）。",
-  "######################################################################",
-  ""
-)
+  $filteredLines = New-Object System.Collections.Generic.List[string]
+  foreach ($line in (Read-Utf8Lines -Path $Path)) {
+    if ($line -match "^\s*$") { continue }
+    if ($line -match "^\s*#") { continue }
+    if ($line -match "^\s*quit\s+-force(?:\s+-code\s+\d+)?\s*$") { continue }
+    if ($line -match "^\s*do\s+(\{.*_wave\.do\}|\"".*_wave\.do\""|[^ ]*_wave\.do)\s*$") { continue }
+    if ($line -match "^\s*do\s+(\{.*\.udo\}|\"".*\.udo\""|[^ ]*\.udo)\s*$") { continue }
+    if ($line -match "^\s*run\s+\S+") { continue }
+    if ($line -match "^\s*view\s+\S+") { continue }
+    $filteredLines.Add($line)
+  }
 
-$outDoLines += $compileLines
-$outDoLines += @(
-  "",
-  "######################################################################",
-  "# EN: Section B - Elaboration command.",
-  "# CN: 段B - 设计展开命令。",
-  "# EN: Source = $elaborateDoName (comments, blank lines, and 'quit -force' removed).",
-  "# CN: 来源 = $elaborateDoName（去掉注释、空行和 'quit -force'）。",
-  "######################################################################",
-  "",
-  "#$elaborateDoName"
-)
-
-$outDoLines += $elaborateBody
-$outDoLines += @(
-  "",
-  "######################################################################",
-  "# EN: Section C - Simulation startup core commands.",
-  "# CN: 段C - 仿真启动核心命令。",
-  "# EN: Source = $simulateDoName (wave/udo/view/run lines removed to allow custom control).",
-  "# CN: 来源 = $simulateDoName（去除 wave/udo/view/run 行，以便自定义控制）。",
-  "######################################################################",
-  "",
-  "#$simulateDoName"
-)
-
-$outDoLines += $simulateBody
-$outDoLines += @(
-  "",
-  "######################################################################",
-  "# EN: Section D - User wave block.",
-  "# CN: 段D - 用户波形配置块。",
-  "# EN: Preserved from existing my_sim.do if markers exist; otherwise template is inserted.",
-  "# CN: 若旧 my_sim.do 中存在标记则保留原块，否则插入模板块。",
-  "######################################################################",
-  ""
-)
-
-$outDoLines += $waveBlock
-$outDoLines += @(
-  "",
-  "######################################################################",
-  "# EN: Section E - Viewer and runtime control.",
-  "# CN: 段E - 波形窗口与运行时长控制。",
-  "# EN: Runtime line is preserved from existing my_sim.do when available.",
-  "# CN: 运行时长优先沿用旧 my_sim.do 的 run 行。",
-  "######################################################################",
-  "",
-  "view wave",
-  "view structure",
-  "view signals",
-  "",
-  "#user decide sim time",
-  $runLine
-)
-
-Write-Utf8NoBomFile -Path $outDoPath -Lines $outDoLines
-
-$binPath = "d:\questasim64_10.6c\win64"
-$binLine = Get-Content -LiteralPath $simulateBat | Where-Object { $_ -match "^\s*set\s+bin_path\s*=" } | Select-Object -First 1
-if ($binLine -match "^\s*set\s+bin_path\s*=\s*(.+?)\s*$") {
-  $binPath = $matches[1]
+  return $filteredLines.ToArray()
 }
 
-$outBatLines = @(
-  "@echo off",
-  "REM EN: Auto generated by gen_my_sim.ps1",
-  "REM CN: 由 gen_my_sim.ps1 自动生成",
-  "REM EN: This launcher runs my_sim.do in Questa and is overwritten on each rerun.",
-  "REM CN: 此启动脚本用于在 Questa 执行 my_sim.do，每次重新生成会覆盖本文件。",
-  "REM EN: bin_path source = simulate.bat (fallback to default if not found).",
-  "REM CN: bin_path 来源 = simulate.bat（若未找到则使用默认值）。",
-  "set bin_path=$binPath",
-  "call %bin_path%/vsim   -do ""do {$OutDoName}"" -l simulate.log",
-  "if ""%errorlevel%""==""1"" goto END",
-  "if ""%errorlevel%""==""0"" goto SUCCESS",
-  ":END",
-  "exit 1",
-  ":SUCCESS",
-  "exit 0"
-)
+function Resolve-BinPathFromSimulateBat {
+  param([Parameter(Mandatory = $true)][string]$SimulateBatPath)
 
-Write-Utf8NoBomFile -Path $outBatPath -Lines $outBatLines
+  $binLine = Read-Utf8Lines -Path $SimulateBatPath |
+    Where-Object { $_ -match "^\s*set\s+bin_path\s*=" } |
+    Select-Object -First 1
 
-Write-Host "Generated:"
-Write-Host "  $outDoPath"
-Write-Host "  $outBatPath"
+  if ([string]::IsNullOrWhiteSpace($binLine)) {
+    return ""
+  }
+
+  if ($binLine -match "^\s*set\s+bin_path\s*=\s*(.+?)\s*$") {
+    return $matches[1].Trim().Trim('"')
+  }
+
+  return ""
+}
+
+function Generate-MySimArtifacts {
+  param(
+    [Parameter(Mandatory = $true)][string]$SimulatorDir,
+    [Parameter(Mandatory = $true)][string]$OutTclName,
+    [Parameter(Mandatory = $true)][string]$OutBatName,
+    [object]$LogBox = $null
+  )
+
+  Write-GenerationLog -Message "开始处理目录 / Start processing: $SimulatorDir" -LogBox $LogBox
+  $context = Get-SimulatorContext -SimulatorDir $SimulatorDir
+  Write-GenerationLog -Message "已确认源目录 / Source directory confirmed: $($context.SimulatorDir)" -LogBox $LogBox
+  Write-GenerationLog -Message "输出文件将写入上一级目录 / Output parent directory: $($context.OutputDir)" -LogBox $LogBox
+
+  $outTclPath = Join-Path $context.OutputDir $OutTclName
+  $outBatPath = Join-Path $context.OutputDir $OutBatName
+  $legacyTclPath = Join-Path $context.SimulatorDir $OutTclName
+
+  $waveBlock = Resolve-WaveBlockWithFallback -PrimaryTclPath $outTclPath -FallbackTclPaths @($legacyTclPath)
+  $runLine = Resolve-ExistingRunLine -MySimTclPath $outTclPath
+  Write-GenerationLog -Message "已读取保留区 / Preserved user block and run line have been loaded." -LogBox $LogBox
+  if ((Test-Path -LiteralPath $legacyTclPath) -and -not (Test-Path -LiteralPath $outTclPath)) {
+    Write-GenerationLog -Message "检测到目标目录中的旧版 TCL，已尝试继承用户波形块 / Legacy TCL in simulator directory detected, wave block fallback applied." -LogBox $LogBox
+  }
+
+  $compileLines = Get-FilteredCompileLines -Path $context.CompileDo
+  $elaborateLines = Get-FilteredElaborateLines -Path $context.ElaborateDo
+  $simulateLines = Get-FilteredSimulateLines -Path $context.SimulateDo
+  $binPath = Resolve-BinPathFromSimulateBat -SimulateBatPath $context.SimulateBat
+
+  $created = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss zzz")
+  $outTclLines = @(
+    "######################################################################",
+    "# EN: File name : $OutTclName",
+    "# CN: 文件名 : $OutTclName",
+    "# EN: Created on: $created",
+    "# CN: 生成时间 : $created",
+    "# EN: Source directory : $($context.SimulatorDir)",
+    "# CN: 来源目录 : $($context.SimulatorDir)",
+    "# EN: This TCL wrapper must stay in the parent directory of '$($context.SimulatorLeaf)'.",
+    "# CN: 本 TCL 包装脚本必须放在 '$($context.SimulatorLeaf)' 的上一级目录。",
+    "######################################################################",
+    "",
+    "# EN: Exit with a non-zero code on script errors. / 脚本报错时返回非零退出码。",
+    "onerror {quit -code 1}",
+    "transcript on",
+    "",
+    "# EN: Resolve the parent/output directory and the actual simulator directory. / 解析上一级输出目录和实际仿真器目录。",
+    "# EN: Use the current working directory set by my_sim.bat instead of relying on 'info script'. / 使用 my_sim.bat 设定的当前目录，而不是依赖 'info script'。",
+    "set launch_dir [file normalize [pwd]]",
+    "set sim_subdir {$($context.SimulatorLeaf)}",
+    "set sim_dir [file normalize [file join `$launch_dir `$sim_subdir]]",
+    "puts `"INFO: launch directory      = `$launch_dir`"",
+    "puts `"INFO: simulator script folder = `$sim_dir`"",
+    "if {![file isdirectory `$sim_dir]} {",
+    "  puts stderr `"ERROR: simulator script directory does not exist: `$sim_dir`"",
+    "  puts stderr `"ERROR: run $OutBatName from the parent directory of $($context.SimulatorLeaf).`"",
+    "  quit -code 1",
+    "}",
+    "if {[catch {cd `$sim_dir} cdError]} {",
+    "  puts stderr `"ERROR: failed to switch to simulator directory: `$sim_dir`"",
+    "  puts stderr `$cdError",
+    "  quit -code 1",
+    "}",
+    "puts `"INFO: working directory switched to `$sim_dir`"",
+    "",
+    "######################################################################",
+    "# EN: Section A - Compile and library setup.",
+    "# CN: 段A - 编译与库映射配置。",
+    "# EN: Relative paths must execute inside '$($context.SimulatorLeaf)'.",
+    "# CN: 相对路径必须在 '$($context.SimulatorLeaf)' 目录内执行。",
+    "######################################################################",
+    "puts `"INFO: section A start / compile and library setup`"",
+    ""
+  )
+
+  $outTclLines += $compileLines
+  $outTclLines += @(
+    "",
+    "######################################################################",
+    "# EN: Section B - Elaborate commands.",
+    "# CN: 段B - 设计展开命令。",
+    "######################################################################",
+    "puts `"INFO: section B start / elaborate`"",
+    ""
+  )
+
+  $outTclLines += $elaborateLines
+  $outTclLines += @(
+    "",
+    "######################################################################",
+    "# EN: Section C - Core simulation startup commands.",
+    "# CN: 段C - 仿真启动核心命令。",
+    "# EN: Wave/view/run commands from Vivado are removed on purpose.",
+    "# CN: Vivado 原始脚本中的 wave/view/run 命令已按设计去除。",
+    "######################################################################",
+    "puts `"INFO: section C start / simulation core`"",
+    ""
+  )
+
+  $outTclLines += $simulateLines
+  $outTclLines += @(
+    "",
+    "######################################################################",
+    "# EN: Section D - User wave block.",
+    "# CN: 段D - 用户波形配置块。",
+    "######################################################################",
+    "puts `"INFO: section D start / user wave block`"",
+    ""
+  )
+
+  $outTclLines += $waveBlock
+  $outTclLines += @(
+    "",
+    "######################################################################",
+    "# EN: Section E - Viewer and runtime control.",
+    "# CN: 段E - 波形窗口与运行时长控制。",
+    "######################################################################",
+    "puts `"INFO: section E start / viewer and runtime`"",
+    "view wave",
+    "view structure",
+    "view signals",
+    "",
+    "#user decide sim time",
+    $runLine,
+    "",
+    "puts `"INFO: runtime command finished or control returned to GUI shell.`""
+  )
+
+  Write-Utf8NoBomFile -Path $outTclPath -Lines $outTclLines
+  Write-GenerationLog -Message "已生成 TCL 包装脚本 / Generated TCL wrapper: $outTclPath" -LogBox $LogBox
+
+  $outBatLines = New-Object System.Collections.Generic.List[string]
+  $outBatLines.Add("@echo off")
+  $outBatLines.Add("setlocal")
+  $outBatLines.Add("set ""SCRIPT_DIR=%~dp0""")
+  $outBatLines.Add("pushd ""%SCRIPT_DIR%"" >nul")
+  $outBatLines.Add("echo [INFO] Launcher directory  : %SCRIPT_DIR%")
+  $outBatLines.Add("echo [INFO] Simulator subdir   : $($context.SimulatorLeaf)")
+  $outBatLines.Add("echo [INFO] Generated TCL path : %SCRIPT_DIR%$OutTclName")
+  $outBatLines.Add("echo [INFO] Keep this BAT and TCL in the parent directory of '$($context.SimulatorLeaf)'.")
+
+  if ([string]::IsNullOrWhiteSpace($binPath)) {
+    $outBatLines.Add("echo [INFO] bin_path not found in simulate.bat, fallback to vsim from PATH.")
+    $outBatLines.Add("call vsim -do ""do {$OutTclName}"" -l simulate.log")
+  }
+  else {
+    $outBatLines.Add("set ""bin_path=$binPath""")
+    $outBatLines.Add("echo [INFO] Questa/ModelSim bin: %bin_path%")
+    $outBatLines.Add("call ""%bin_path%\vsim"" -do ""do {$OutTclName}"" -l simulate.log")
+  }
+
+  $outBatLines.Add("set ""VSIM_EXIT=%ERRORLEVEL%""")
+  $outBatLines.Add("popd >nul")
+  $outBatLines.Add("if not ""%VSIM_EXIT%""==""0"" (")
+  $outBatLines.Add("  echo [ERROR] Simulation launcher exited with code %VSIM_EXIT%.")
+  $outBatLines.Add("  exit /b %VSIM_EXIT%")
+  $outBatLines.Add(")")
+  $outBatLines.Add("echo [INFO] Simulation launcher finished with code 0.")
+  $outBatLines.Add("exit /b 0")
+
+  Write-Utf8NoBomFile -Path $outBatPath -Lines $outBatLines.ToArray()
+  Write-GenerationLog -Message "已生成 BAT 启动脚本 / Generated BAT launcher: $outBatPath" -LogBox $LogBox
+
+  return [pscustomobject]@{
+    SimulatorDir = $context.SimulatorDir
+    OutputDir    = $context.OutputDir
+    OutputTcl    = $outTclPath
+    OutputBat    = $outBatPath
+  }
+}
+
+function Show-GenerationCompletion {
+  param(
+    [Parameter(Mandatory = $true)]$Owner,
+    [Parameter(Mandatory = $true)]$Result
+  )
+
+  $message = @"
+已完成生成。
+
+源目录：
+$($Result.SimulatorDir)
+
+输出目录（上一级）：
+$($Result.OutputDir)
+
+生成文件：
+$($Result.OutputTcl)
+$($Result.OutputBat)
+
+请将生成出来的 BAT 和 TCL 保持放在上述上一级目录，
+不要移动回 questa/modelsim 目录内，否则运行基准目录会失配。
+"@
+
+  [System.Windows.Forms.MessageBox]::Show(
+    $Owner,
+    $message,
+    "生成完成 / Generation Completed",
+    [System.Windows.Forms.MessageBoxButtons]::OK,
+    [System.Windows.Forms.MessageBoxIcon]::Information
+  ) | Out-Null
+}
+
+function Show-GeneratorUi {
+  param(
+    [string]$InitialSimulatorDir = "",
+    [string]$OutTclName = "my_sim.tcl",
+    [string]$OutBatName = "my_sim.bat"
+  )
+
+  if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne [System.Threading.ApartmentState]::STA) {
+    throw "UI 模式需要 STA 线程。请优先通过 gen_my_sim.bat 启动。"
+  }
+
+  Add-Type -AssemblyName System.Windows.Forms
+  Add-Type -AssemblyName System.Drawing
+
+  if ([string]::IsNullOrWhiteSpace($InitialSimulatorDir)) {
+    $InitialSimulatorDir = (Resolve-Path -LiteralPath (Get-Location).Path).Path
+  }
+
+  $form = New-Object System.Windows.Forms.Form
+  $form.Text = "Questa/ModelSim 脚本生成器"
+  $form.StartPosition = "CenterScreen"
+  $form.Size = New-Object System.Drawing.Size(900, 560)
+  $form.MinimumSize = New-Object System.Drawing.Size(900, 560)
+  $form.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+
+  $titleLabel = New-Object System.Windows.Forms.Label
+  $titleLabel.Location = New-Object System.Drawing.Point(18, 18)
+  $titleLabel.Size = New-Object System.Drawing.Size(820, 28)
+  $titleLabel.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 13)
+  $titleLabel.Text = "选择 Questa/ModelSim 目录并生成上一级运行脚本"
+  $form.Controls.Add($titleLabel)
+
+  $pathLabel = New-Object System.Windows.Forms.Label
+  $pathLabel.Location = New-Object System.Drawing.Point(18, 62)
+  $pathLabel.Size = New-Object System.Drawing.Size(220, 24)
+  $pathLabel.Text = "目标目录"
+  $form.Controls.Add($pathLabel)
+
+  $pathTextBox = New-Object System.Windows.Forms.TextBox
+  $pathTextBox.Location = New-Object System.Drawing.Point(18, 90)
+  $pathTextBox.Size = New-Object System.Drawing.Size(730, 28)
+  $pathTextBox.Anchor = "Top,Left,Right"
+  $pathTextBox.Text = $InitialSimulatorDir
+  $form.Controls.Add($pathTextBox)
+
+  $browseButton = New-Object System.Windows.Forms.Button
+  $browseButton.Location = New-Object System.Drawing.Point(762, 88)
+  $browseButton.Size = New-Object System.Drawing.Size(104, 32)
+  $browseButton.Anchor = "Top,Right"
+  $browseButton.Text = "浏览..."
+  $form.Controls.Add($browseButton)
+
+  $hintLabel = New-Object System.Windows.Forms.Label
+  $hintLabel.Location = New-Object System.Drawing.Point(18, 126)
+  $hintLabel.Size = New-Object System.Drawing.Size(848, 20)
+  $hintLabel.Anchor = "Top,Left,Right"
+  $hintLabel.Text = "请选择包含 *_compile.do、*_elaborate.do、*_simulate.do、simulate.bat 的目录，生成文件会放到其上一级目录。"
+  $form.Controls.Add($hintLabel)
+
+  $generateButton = New-Object System.Windows.Forms.Button
+  $generateButton.Location = New-Object System.Drawing.Point(18, 162)
+  $generateButton.Size = New-Object System.Drawing.Size(120, 32)
+  $generateButton.Text = "生成脚本"
+  $form.Controls.Add($generateButton)
+
+  $closeButton = New-Object System.Windows.Forms.Button
+  $closeButton.Location = New-Object System.Drawing.Point(150, 162)
+  $closeButton.Size = New-Object System.Drawing.Size(90, 32)
+  $closeButton.Text = "关闭"
+  $form.Controls.Add($closeButton)
+
+  $statusLabel = New-Object System.Windows.Forms.Label
+  $statusLabel.Location = New-Object System.Drawing.Point(258, 166)
+  $statusLabel.Size = New-Object System.Drawing.Size(608, 24)
+  $statusLabel.Anchor = "Top,Left,Right"
+  $statusLabel.Text = "等待选择目录。"
+  $form.Controls.Add($statusLabel)
+
+  $logLabel = New-Object System.Windows.Forms.Label
+  $logLabel.Location = New-Object System.Drawing.Point(18, 214)
+  $logLabel.Size = New-Object System.Drawing.Size(120, 22)
+  $logLabel.Text = "运行日志"
+  $form.Controls.Add($logLabel)
+
+  $logTextBox = New-Object System.Windows.Forms.TextBox
+  $logTextBox.Location = New-Object System.Drawing.Point(18, 240)
+  $logTextBox.Size = New-Object System.Drawing.Size(848, 268)
+  $logTextBox.Anchor = "Top,Bottom,Left,Right"
+  $logTextBox.Multiline = $true
+  $logTextBox.ScrollBars = "Vertical"
+  $logTextBox.ReadOnly = $true
+  $logTextBox.WordWrap = $false
+  $logTextBox.Font = New-Object System.Drawing.Font("Consolas", 10)
+  $form.Controls.Add($logTextBox)
+
+  $browseButton.Add_Click({
+    $initialBrowseDir = ""
+    if (-not [string]::IsNullOrWhiteSpace($pathTextBox.Text) -and (Test-Path -LiteralPath $pathTextBox.Text)) {
+      $initialBrowseDir = (Resolve-Path -LiteralPath $pathTextBox.Text).Path
+    }
+    else {
+      $initialBrowseDir = (Resolve-Path -LiteralPath (Get-Location).Path).Path
+    }
+
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = "请选择 questa/modelsim 目录"
+    $dialog.InitialDirectory = $initialBrowseDir
+    $dialog.Filter = "文件夹选择占位|*.folder"
+    $dialog.CheckFileExists = $false
+    $dialog.CheckPathExists = $true
+    $dialog.ValidateNames = $false
+    $dialog.FileName = "请选择此目录"
+    $dialog.RestoreDirectory = $true
+
+    if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
+      $selectedPath = Split-Path -Parent $dialog.FileName
+      if ([string]::IsNullOrWhiteSpace($selectedPath)) {
+        $selectedPath = $initialBrowseDir
+      }
+
+      $pathTextBox.Text = $selectedPath
+      Write-GenerationLog -Message "已选择目录 / Selected directory: $selectedPath" -LogBox $logTextBox
+      $statusLabel.Text = "目录已选择，等待生成。"
+    }
+  })
+
+  $closeButton.Add_Click({
+    $form.Close()
+  })
+
+  $generateAction = {
+    try {
+      $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+      $generateButton.Enabled = $false
+      $statusLabel.Text = "处理中..."
+
+      $selectedDir = $pathTextBox.Text.Trim()
+      if ([string]::IsNullOrWhiteSpace($selectedDir)) {
+        throw "请先选择要处理的 questa/modelsim 目录。"
+      }
+
+      $result = Generate-MySimArtifacts -SimulatorDir $selectedDir -OutTclName $OutTclName -OutBatName $OutBatName -LogBox $logTextBox
+      $statusLabel.Text = "生成完成，输出位于上一级目录。"
+      Write-GenerationLog -Message "请注意放置位置 / Keep the generated BAT and TCL in: $($result.OutputDir)" -LogBox $logTextBox
+      Show-GenerationCompletion -Owner $form -Result $result
+    }
+    catch {
+      $statusLabel.Text = "生成失败。"
+      Write-GenerationLog -Message ("生成失败 / Generation failed: {0}" -f $_.Exception.Message) -LogBox $logTextBox
+      [System.Windows.Forms.MessageBox]::Show(
+        $form,
+        $_.Exception.Message,
+        "生成失败 / Generation Failed",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Error
+      ) | Out-Null
+    }
+    finally {
+      $form.Cursor = [System.Windows.Forms.Cursors]::Default
+      $generateButton.Enabled = $true
+    }
+  }
+
+  $generateButton.Add_Click($generateAction)
+  $form.AcceptButton = $generateButton
+  $form.CancelButton = $closeButton
+
+  [void]$form.ShowDialog()
+}
+
+if ($NoUi -or -not [string]::IsNullOrWhiteSpace($SimulatorDir)) {
+  $result = Generate-MySimArtifacts -SimulatorDir $SimulatorDir -OutTclName $OutTclName -OutBatName $OutBatName
+  Write-Host ""
+  Write-Host "完成。输出文件位于上一级目录 / Completed. Output files are in the parent directory:"
+  Write-Host "  $($result.OutputTcl)"
+  Write-Host "  $($result.OutputBat)"
+  Write-Host "请保持这两个文件放在上述上一级目录，不要移动回 questa/modelsim 目录。"
+}
+else {
+  Show-GeneratorUi -InitialSimulatorDir $SimulatorDir -OutTclName $OutTclName -OutBatName $OutBatName
+}

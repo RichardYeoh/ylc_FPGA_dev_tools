@@ -1,79 +1,63 @@
-# 仿真 DO 脚本自动生成说明（通用版）
+# 仿真 TCL/BAT 自动生成说明
 
-## 1. 目录结构
-将以下 3 个文件放在任意工程的：
+## 1. 工具放置位置
+将以下文件放在任意工程的：
 
 `<project>.srcs\sim_1\sim_do_auto_gen\`
 
-- `gen_my_sim.ps1`：主生成脚本（PowerShell）
-- `gen_my_sim.bat`：便捷启动脚本（Windows）
-- `仿真do脚本自动生成.md`：本说明
+- `gen_my_sim.ps1`
+- `gen_my_sim.bat`
+- 本说明文档
 
-## 2. 使用前提（必须）
+## 2. 使用前提
 首次使用前，必须先在 Vivado 中至少运行一次仿真（Behavioral Simulation）。
 
 原因：
-- Vivado 会先生成基础脚本：`*_compile.do`、`*_elaborate.do`、`*_simulate.do`
-- 本工具是基于这些脚本自动拼接并生成 `my_sim.do` / `my_sim.bat`
+- Vivado 会先生成 `*_compile.do`、`*_elaborate.do`、`*_simulate.do`、`simulate.bat`
+- 本工具基于这些脚本生成新的 `my_sim.tcl` 和 `my_sim.bat`
 
-如果未先跑一次仿真，脚本会提示找不到 `*_compile.do`。
-
-## 3. 生成方法
+## 3. 基本使用方式
 在 `sim_do_auto_gen` 目录下执行：
 
 ```bat
 .\gen_my_sim.bat
 ```
 
-或：
+会弹出简洁 UI，手动选择要处理的 `questa` 或 `modelsim` 目录，例如：
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\gen_my_sim.ps1
-```
+`<project>.sim\sim_1\behav\questa`
 
-## 4. 默认路径自动识别规则
-脚本会自动推断目标目录（无需写死工程名）：
+## 4. 输出位置
+生成结果放在所选目录的上一级：
 
-1. 优先按同级结构推断：  
-`<project>.srcs` -> `<project>.sim\sim_1\behav\questa`
-2. 若同目录下存在多个 `*.sim`，会优先选同名工程；否则回退到最近更新的一个。
+`<project>.sim\sim_1\behav\`
 
-若自动识别失败，可手动指定：
-
-```powershell
-.\gen_my_sim.ps1 -QuestaDir "D:\path\to\<project>.sim\sim_1\behav\questa"
-```
-
-## 5. 输出位置
-默认输出到：
-
-`<project>.sim\sim_1\behav\questa\`
-
-- `my_sim.do`
+输出文件：
+- `my_sim.tcl`
 - `my_sim.bat`
 
-## 6. 后续自动运行
-生成完成后，在输出目录执行：
+## 5. 运行位置
+生成完成后，请在上一级输出目录执行：
 
 ```bat
 .\my_sim.bat
 ```
 
-即可调用 Questa/ModelSim 按 `my_sim.do` 自动运行仿真。
+重点：
+- `my_sim.tcl` 和 `my_sim.bat` 必须继续放在 `behav` 这一层
+- 不要把它们移动回 `questa/modelsim` 目录
+- 新脚本会在运行时自动切换到 `questa/modelsim` 目录，以保证 Vivado 原始相对路径仍然正确
 
-## 7. 覆盖更新行为
-该工具是幂等覆盖模式：每次执行都会重写 `my_sim.do` 和 `my_sim.bat`，用于同步最新 Vivado 生成脚本。
+## 6. 保留与继承行为
+重新生成时会尽量保留：
+- 上一级已有 `my_sim.tcl` 中的用户波形块
+- 上一级已有 `my_sim.tcl` 中最后一条 `run ...`
 
-建议在以下情况重新生成：
-- RTL/仿真文件列表变化
-- Vivado 重新导出仿真脚本
-- 你修改了波形配置或运行时长策略
+如果上一级还没有 `my_sim.tcl`，但目标 `questa/modelsim` 目录中已有同名 `my_sim.tcl`，则会继承其中的用户波形块后再生成新文件。
 
-## 8. 可保留的自定义内容
-在 `my_sim.do` 中，以下内容会尽量保留：
-
-- `#user wave-watch add here` 到 `#user wave-watch add here end` 之间的波形块
-- 最后一条 `run ...` 运行时长设置
-
-因此可长期维护自己的波形观察列表和仿真时长，不必每次手工回填。
-
+## 7. 已处理的问题
+本版本同时修复了以下问题：
+- Questa 安装路径包含空格时，启动 BAT 的命令引用问题
+- Windows PowerShell 下回读 UTF-8 无 BOM 文件时，可能破坏中文用户区的问题
+- 旧版本要求在 `questa` 目录内运行的问题，现已改为在上一级目录稳定运行
+- `do xxx_wave.do` / `do "xxx_wave.do"` / `do {xxx_wave.do}` 等形式的兼容性问题
