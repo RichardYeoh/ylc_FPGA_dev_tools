@@ -8,6 +8,9 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+$script:ProjectLeafSearchCache = @{}
+$script:CommonResourceFolderNames = @("mem", "rom", "data", "init", "coef", "coeff", "table", "tables", "lut", "rtl")
+
 function Write-Utf8NoBomFile {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
@@ -276,12 +279,365 @@ function Resolve-BinPathFromSimulateBat {
   return ""
 }
 
+function Convert-ToTclPath {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  return $Path.Replace("\", "/")
+}
+
+function Get-NormalizedPathText {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  return $Path.Replace("/", "\").TrimEnd("\").ToLowerInvariant()
+}
+
+function Get-PathSegments {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  return @(
+    (Get-NormalizedPathText -Path $Path) -split "\\+" |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+  )
+}
+
+function Get-CommonPathSegmentCount {
+  param(
+    [Parameter(Mandatory = $true)][string]$LeftPath,
+    [Parameter(Mandatory = $true)][string]$RightPath
+  )
+
+  $leftSegments = @(Get-PathSegments -Path $LeftPath)
+  $rightSegments = @(Get-PathSegments -Path $RightPath)
+  $commonCount = [Math]::Min($leftSegments.Count, $rightSegments.Count)
+
+  for ($i = 0; $i -lt $commonCount; $i++) {
+    if ($leftSegments[$i] -ne $rightSegments[$i]) {
+      return $i
+    }
+  }
+
+  return $commonCount
+}
+
+function Test-IsPathUnder {
+  param(
+    [Parameter(Mandatory = $true)][string]$ChildPath,
+    [Parameter(Mandatory = $true)][string]$ParentPath
+  )
+
+  $childText = (Get-NormalizedPathText -Path $ChildPath) + "\"
+  $parentText = (Get-NormalizedPathText -Path $ParentPath) + "\"
+  return $childText.StartsWith($parentText, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Add-UniqueString {
+  param(
+    [Parameter(Mandatory = $true)]$List,
+    [Parameter(Mandatory = $true)][string]$Value
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Value)) {
+    return
+  }
+
+  if (-not $List.Contains($Value)) {
+    $List.Add($Value) | Out-Null
+  }
+}
+
+function Get-ProjectSearchRoot {
+  param([Parameter(Mandatory = $true)][string]$SimulatorDir)
+
+  $currentDir = Get-Item -LiteralPath (Resolve-Path -LiteralPath $SimulatorDir).Path
+  while ($null -ne $currentDir) {
+    if ($currentDir.Name -match "\.(sim|srcs)$") {
+      return $currentDir.Parent.FullName
+    }
+
+    $xprFiles = @(
+      Get-ChildItem -LiteralPath $currentDir.FullName -File -Filter "*.xpr" -ErrorAction SilentlyContinue
+    )
+    if ($xprFiles.Count -gt 0) {
+      return $currentDir.FullName
+    }
+
+    $currentDir = $currentDir.Parent
+  }
+
+  return (Split-Path -Parent (Resolve-Path -LiteralPath $SimulatorDir).Path)
+}
+
+function Get-ProjectLeafSearchCandidates {
+  param(
+    [Parameter(Mandatory = $true)][string]$ProjectRoot,
+    [Parameter(Mandatory = $true)][string]$LeafName
+  )
+
+  $resolvedRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
+  $cacheKey = "{0}|{1}" -f (Get-NormalizedPathText -Path $resolvedRoot), $LeafName.ToLowerInvariant()
+  if ($script:ProjectLeafSearchCache.ContainsKey($cacheKey)) {
+    return $script:ProjectLeafSearchCache[$cacheKey]
+  }
+
+  $matches = @(
+    Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -Filter $LeafName -ErrorAction SilentlyContinue |
+      ForEach-Object { $_.FullName } |
+      Select-Object -Unique
+  )
+  $script:ProjectLeafSearchCache[$cacheKey] = $matches
+  return $matches
+}
+
+function Get-CompileSourceFilesFromLines {
+  param(
+    [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$CompileLines,
+    [Parameter(Mandatory = $true)][string]$SimulatorDir
+  )
+
+  $resolvedFiles = New-Object System.Collections.Generic.List[string]
+
+  foreach ($line in $CompileLines) {
+    foreach ($match in [System.Text.RegularExpressions.Regex]::Matches($line, '"([^"]+)"')) {
+      $candidate = $match.Groups[1].Value
+      if ([string]::IsNullOrWhiteSpace($candidate)) {
+        continue
+      }
+
+      if ($candidate -eq "glbl.v") {
+        continue
+      }
+
+      $fullPath = if ([System.IO.Path]::IsPathRooted($candidate)) {
+        $candidate
+      }
+      else {
+        Join-Path $SimulatorDir $candidate
+      }
+
+      if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+        continue
+      }
+
+      Add-UniqueString -List $resolvedFiles -Value ((Resolve-Path -LiteralPath $fullPath).Path)
+    }
+  }
+
+  return $resolvedFiles.ToArray()
+}
+
+function Get-MemoryReferenceCandidatePaths {
+  param(
+    [Parameter(Mandatory = $true)][string]$SourceFile,
+    [Parameter(Mandatory = $true)][string]$MemRef,
+    [Parameter(Mandatory = $true)][string]$ProjectRoot
+  )
+
+  $candidatePaths = New-Object System.Collections.Generic.List[string]
+  $sourceDir = Split-Path -Parent $SourceFile
+
+  if ([System.IO.Path]::IsPathRooted($MemRef)) {
+    if (Test-Path -LiteralPath $MemRef -PathType Leaf) {
+      Add-UniqueString -List $candidatePaths -Value ((Resolve-Path -LiteralPath $MemRef).Path)
+    }
+    return $candidatePaths.ToArray()
+  }
+
+  $searchBases = New-Object System.Collections.Generic.List[string]
+  $currentDir = $sourceDir
+  $walkDepth = 0
+
+  while (-not [string]::IsNullOrWhiteSpace($currentDir)) {
+    Add-UniqueString -List $searchBases -Value $currentDir
+    foreach ($folderName in $script:CommonResourceFolderNames) {
+      $resourceDir = Join-Path $currentDir $folderName
+      if (Test-Path -LiteralPath $resourceDir -PathType Container) {
+        Add-UniqueString -List $searchBases -Value $resourceDir
+      }
+    }
+
+    if ((Get-NormalizedPathText -Path $currentDir) -eq (Get-NormalizedPathText -Path $ProjectRoot)) {
+      break
+    }
+
+    if ($walkDepth -ge 4) {
+      break
+    }
+
+    $parentDir = Split-Path -Parent $currentDir
+    if ([string]::IsNullOrWhiteSpace($parentDir) -or ((Get-NormalizedPathText -Path $parentDir) -eq (Get-NormalizedPathText -Path $currentDir))) {
+      break
+    }
+
+    $currentDir = $parentDir
+    $walkDepth++
+  }
+
+  foreach ($baseDir in $searchBases) {
+    $candidate = Join-Path $baseDir $MemRef
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+      Add-UniqueString -List $candidatePaths -Value ((Resolve-Path -LiteralPath $candidate).Path)
+    }
+  }
+
+  $leafName = [System.IO.Path]::GetFileName($MemRef)
+  if (-not [string]::IsNullOrWhiteSpace($leafName)) {
+    foreach ($projectCandidate in @(Get-ProjectLeafSearchCandidates -ProjectRoot $ProjectRoot -LeafName $leafName)) {
+      Add-UniqueString -List $candidatePaths -Value $projectCandidate
+    }
+  }
+
+  return $candidatePaths.ToArray()
+}
+
+function Get-MemoryReferenceCandidateScore {
+  param(
+    [Parameter(Mandatory = $true)][string]$SourceFile,
+    [Parameter(Mandatory = $true)][string]$MemRef,
+    [Parameter(Mandatory = $true)][string]$CandidatePath
+  )
+
+  $sourceDir = Split-Path -Parent $SourceFile
+  $candidateDir = Split-Path -Parent $CandidatePath
+  $score = 0
+
+  if ((Get-NormalizedPathText -Path $candidateDir) -eq (Get-NormalizedPathText -Path $sourceDir)) {
+    $score += 10000
+  }
+
+  if (Test-IsPathUnder -ChildPath $CandidatePath -ParentPath $sourceDir) {
+    $score += 2000
+  }
+
+  $memRefNorm = (Get-NormalizedPathText -Path $MemRef)
+  $candidateNorm = (Get-NormalizedPathText -Path $CandidatePath)
+  if ($memRefNorm.Contains("\") -and $candidateNorm.EndsWith("\" + $memRefNorm, [System.StringComparison]::OrdinalIgnoreCase)) {
+    $score += 1500
+  }
+
+  $commonCount = Get-CommonPathSegmentCount -LeftPath $sourceDir -RightPath $candidateDir
+  $sourceSegments = Get-PathSegments -Path $sourceDir
+  $candidateSegments = Get-PathSegments -Path $candidateDir
+  $distance = ($sourceSegments.Count - $commonCount) + ($candidateSegments.Count - $commonCount)
+  $score += ($commonCount * 100) - $distance
+
+  $candidateLeafDir = [System.IO.Path]::GetFileName($candidateDir)
+  if ($script:CommonResourceFolderNames -contains $candidateLeafDir.ToLowerInvariant()) {
+    $score += 25
+  }
+
+  return $score
+}
+
+function Resolve-MemoryReferenceSource {
+  param(
+    [Parameter(Mandatory = $true)][string]$SourceFile,
+    [Parameter(Mandatory = $true)][string]$MemRef,
+    [Parameter(Mandatory = $true)][string]$ProjectRoot,
+    [scriptblock]$CandidateSelectionCallback = $null,
+    [object]$LogBox = $null
+  )
+
+  $candidatePaths = @(Get-MemoryReferenceCandidatePaths -SourceFile $SourceFile -MemRef $MemRef -ProjectRoot $ProjectRoot)
+  if ($candidatePaths.Count -eq 0) {
+    Write-GenerationLog -Message ("未解析到初始化文件 / Memory init file unresolved: {0} (source: {1})" -f $MemRef, $SourceFile) -LogBox $LogBox
+    return ""
+  }
+
+  if ($candidatePaths.Count -eq 1) {
+    return $candidatePaths[0]
+  }
+
+  $scoredCandidates = @(
+    $candidatePaths |
+      ForEach-Object {
+        [pscustomobject]@{
+          Path  = $_
+          Score = Get-MemoryReferenceCandidateScore -SourceFile $SourceFile -MemRef $MemRef -CandidatePath $_
+        }
+      } |
+      Sort-Object -Property @(
+        @{ Expression = "Score"; Descending = $true },
+        @{ Expression = "Path"; Descending = $false }
+      )
+  )
+
+  $recommendedPath = $scoredCandidates[0].Path
+  Write-GenerationLog -Message ("检测到多个初始化文件候选 / Multiple memory init candidates detected: {0}" -f $MemRef) -LogBox $LogBox
+  Write-GenerationLog -Message ("工具推荐候选 / Recommended candidate: {0}" -f $recommendedPath) -LogBox $LogBox
+
+  if ($null -ne $CandidateSelectionCallback) {
+    $selectedPath = & $CandidateSelectionCallback ([pscustomobject]@{
+      SourceFile      = $SourceFile
+      MemoryReference = $MemRef
+      RecommendedPath = $recommendedPath
+      Candidates      = $scoredCandidates
+    })
+
+    if (-not [string]::IsNullOrWhiteSpace($selectedPath) -and ($candidatePaths -contains $selectedPath)) {
+      Write-GenerationLog -Message ("已选择候选 / Selected candidate: {0}" -f $selectedPath) -LogBox $LogBox
+      return $selectedPath
+    }
+  }
+
+  Write-GenerationLog -Message ("未显式选择候选，采用推荐项 / No explicit selection provided, use recommended candidate: {0}" -f $recommendedPath) -LogBox $LogBox
+  return $recommendedPath
+}
+
+function Get-MemoryInitSyncItems {
+  param(
+    [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$CompileLines,
+    [Parameter(Mandatory = $true)][string]$SimulatorDir,
+    [scriptblock]$CandidateSelectionCallback = $null,
+    [object]$LogBox = $null
+  )
+
+  $syncItems = New-Object System.Collections.Generic.List[object]
+  $compileSources = @(Get-CompileSourceFilesFromLines -CompileLines $CompileLines -SimulatorDir $SimulatorDir)
+  $projectRoot = Get-ProjectSearchRoot -SimulatorDir $SimulatorDir
+  Write-GenerationLog -Message ("初始化文件搜索根目录 / Memory init search root: {0}" -f $projectRoot) -LogBox $LogBox
+
+  foreach ($sourceFile in $compileSources) {
+    foreach ($line in (Read-Utf8Lines -Path $sourceFile)) {
+      foreach ($match in [System.Text.RegularExpressions.Regex]::Matches($line, '\$readmem(?:b|h)\s*\(\s*"([^"]+)"')) {
+        $memRef = $match.Groups[1].Value
+        if ([string]::IsNullOrWhiteSpace($memRef)) {
+          continue
+        }
+
+        $memSource = Resolve-MemoryReferenceSource -SourceFile $sourceFile -MemRef $memRef -ProjectRoot $projectRoot -CandidateSelectionCallback $CandidateSelectionCallback -LogBox $LogBox
+        if ([string]::IsNullOrWhiteSpace($memSource)) {
+          continue
+        }
+
+        $targetPath = if ([System.IO.Path]::IsPathRooted($memRef)) {
+          Join-Path $SimulatorDir ([System.IO.Path]::GetFileName($memRef))
+        }
+        else {
+          Join-Path $SimulatorDir $memRef
+        }
+
+        $syncItems.Add([pscustomobject]@{
+          Source = $memSource
+          Target = $targetPath
+        })
+      }
+    }
+  }
+
+  return @(
+    $syncItems |
+      Group-Object Target |
+      ForEach-Object { $_.Group[0] }
+  )
+}
+
 function Generate-MySimArtifacts {
   param(
     [Parameter(Mandatory = $true)][string]$SimulatorDir,
     [Parameter(Mandatory = $true)][string]$OutTclName,
     [Parameter(Mandatory = $true)][string]$OutBatName,
-    [object]$LogBox = $null
+    [object]$LogBox = $null,
+    [scriptblock]$CandidateSelectionCallback = $null
   )
 
   Write-GenerationLog -Message "开始处理目录 / Start processing: $SimulatorDir" -LogBox $LogBox
@@ -304,6 +660,7 @@ function Generate-MySimArtifacts {
   $elaborateLines = Get-FilteredElaborateLines -Path $context.ElaborateDo
   $simulateLines = Get-FilteredSimulateLines -Path $context.SimulateDo
   $binPath = Resolve-BinPathFromSimulateBat -SimulateBatPath $context.SimulateBat
+  $memInitSyncItems = @(Get-MemoryInitSyncItems -CompileLines $compileLines -SimulatorDir $context.SimulatorDir -CandidateSelectionCallback $CandidateSelectionCallback -LogBox $LogBox)
 
   $created = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss zzz")
   $outTclLines = @(
@@ -350,6 +707,51 @@ function Generate-MySimArtifacts {
     "puts `"INFO: section A start / compile and library setup`"",
     ""
   )
+
+  if ($memInitSyncItems.Count -gt 0) {
+    $outTclLines += @(
+      "######################################################################",
+      "# EN: Section A0 - Memory initialization file staging.",
+      "# CN: 段A0 - 内存初始化文件同步。",
+      "######################################################################",
+      "puts `"INFO: section A0 start / sync memory init files`"",
+      "set mem_init_sync_list [list \"
+    )
+
+    for ($i = 0; $i -lt $memInitSyncItems.Count; $i++) {
+      $item = $memInitSyncItems[$i]
+      $srcPath = Convert-ToTclPath -Path $item.Source
+      $dstPath = Convert-ToTclPath -Path $item.Target
+      $line = "  [list `"$srcPath`" `"$dstPath`"]"
+      if ($i -lt ($memInitSyncItems.Count - 1)) {
+        $line += " \"
+      }
+      $outTclLines += $line
+    }
+
+    $outTclLines += @(
+      "]",
+      "foreach mem_pair `$mem_init_sync_list {",
+      "  set mem_src [lindex `$mem_pair 0]",
+      "  set mem_dst [lindex `$mem_pair 1]",
+      "  set mem_dst_dir [file dirname `$mem_dst]",
+      "  if {![file exists `$mem_src]} {",
+      "    puts stderr `"ERROR: memory init file not found: `$mem_src`"",
+      "    quit -code 1",
+      "  }",
+      "  if {![file isdirectory `$mem_dst_dir]} {",
+      "    file mkdir `$mem_dst_dir",
+      "  }",
+      "  if {[catch {file copy -force `$mem_src `$mem_dst} copyError]} {",
+      "    puts stderr `"ERROR: failed to stage memory init file: `$mem_src -> `$mem_dst`"",
+      "    puts stderr `$copyError",
+      "    quit -code 1",
+      "  }",
+      "  puts `"INFO: staged memory init file: `$mem_src -> `$mem_dst`"",
+      "}",
+      ""
+    )
+  }
 
   $outTclLines += $compileLines
   $outTclLines += @(
@@ -477,6 +879,106 @@ $($Result.OutputBat)
     [System.Windows.Forms.MessageBoxButtons]::OK,
     [System.Windows.Forms.MessageBoxIcon]::Information
   ) | Out-Null
+}
+
+function Show-MemoryCandidateSelectionDialog {
+  param(
+    [Parameter(Mandatory = $true)]$Owner,
+    [Parameter(Mandatory = $true)]$SelectionContext
+  )
+
+  $dialog = New-Object System.Windows.Forms.Form
+  $dialog.Text = "选择初始化文件 / Select Memory Init File"
+  $dialog.StartPosition = "CenterParent"
+  $dialog.Size = New-Object System.Drawing.Size(980, 560)
+  $dialog.MinimumSize = New-Object System.Drawing.Size(980, 560)
+  $dialog.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+  $dialog.FormBorderStyle = "Sizable"
+  $dialog.MaximizeBox = $false
+  $dialog.MinimizeBox = $false
+
+  $titleLabel = New-Object System.Windows.Forms.Label
+  $titleLabel.Location = New-Object System.Drawing.Point(18, 18)
+  $titleLabel.Size = New-Object System.Drawing.Size(924, 28)
+  $titleLabel.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 12)
+  $titleLabel.Text = "检测到多个初始化文件候选，请选择一个；默认已选中工具推荐项。"
+  $dialog.Controls.Add($titleLabel)
+
+  $refLabel = New-Object System.Windows.Forms.Label
+  $refLabel.Location = New-Object System.Drawing.Point(18, 56)
+  $refLabel.Size = New-Object System.Drawing.Size(924, 44)
+  $refLabel.Text = "引用字符串 / Memory reference:`r`n$($SelectionContext.MemoryReference)"
+  $dialog.Controls.Add($refLabel)
+
+  $sourceLabel = New-Object System.Windows.Forms.Label
+  $sourceLabel.Location = New-Object System.Drawing.Point(18, 108)
+  $sourceLabel.Size = New-Object System.Drawing.Size(924, 44)
+  $sourceLabel.Text = "来源源码 / Source file:`r`n$($SelectionContext.SourceFile)"
+  $dialog.Controls.Add($sourceLabel)
+
+  $recommendLabel = New-Object System.Windows.Forms.Label
+  $recommendLabel.Location = New-Object System.Drawing.Point(18, 160)
+  $recommendLabel.Size = New-Object System.Drawing.Size(924, 44)
+  $recommendLabel.Text = "工具推荐 / Recommended:`r`n$($SelectionContext.RecommendedPath)"
+  $dialog.Controls.Add($recommendLabel)
+
+  $listLabel = New-Object System.Windows.Forms.Label
+  $listLabel.Location = New-Object System.Drawing.Point(18, 214)
+  $listLabel.Size = New-Object System.Drawing.Size(280, 24)
+  $listLabel.Text = "候选列表 / Candidate list"
+  $dialog.Controls.Add($listLabel)
+
+  $candidateListBox = New-Object System.Windows.Forms.ListBox
+  $candidateListBox.Location = New-Object System.Drawing.Point(18, 242)
+  $candidateListBox.Size = New-Object System.Drawing.Size(924, 226)
+  $candidateListBox.Anchor = "Top,Bottom,Left,Right"
+  $candidateListBox.HorizontalScrollbar = $true
+  $dialog.Controls.Add($candidateListBox)
+
+  for ($i = 0; $i -lt $SelectionContext.Candidates.Count; $i++) {
+    $candidate = $SelectionContext.Candidates[$i]
+    [void]$candidateListBox.Items.Add($candidate.Path)
+    if ($candidate.Path -eq $SelectionContext.RecommendedPath) {
+      $candidateListBox.SelectedIndex = $i
+    }
+  }
+
+  if ($candidateListBox.SelectedIndex -lt 0 -and $candidateListBox.Items.Count -gt 0) {
+    $candidateListBox.SelectedIndex = 0
+  }
+
+  $detailLabel = New-Object System.Windows.Forms.Label
+  $detailLabel.Location = New-Object System.Drawing.Point(18, 476)
+  $detailLabel.Size = New-Object System.Drawing.Size(924, 24)
+  $detailLabel.Anchor = "Bottom,Left,Right"
+  $detailLabel.Text = "若直接关闭或取消，将继续使用默认推荐项。"
+  $dialog.Controls.Add($detailLabel)
+
+  $okButton = New-Object System.Windows.Forms.Button
+  $okButton.Location = New-Object System.Drawing.Point(738, 504)
+  $okButton.Size = New-Object System.Drawing.Size(96, 32)
+  $okButton.Anchor = "Bottom,Right"
+  $okButton.Text = "确定"
+  $okButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
+  $dialog.Controls.Add($okButton)
+
+  $cancelButton = New-Object System.Windows.Forms.Button
+  $cancelButton.Location = New-Object System.Drawing.Point(846, 504)
+  $cancelButton.Size = New-Object System.Drawing.Size(96, 32)
+  $cancelButton.Anchor = "Bottom,Right"
+  $cancelButton.Text = "取消"
+  $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+  $dialog.Controls.Add($cancelButton)
+
+  $dialog.AcceptButton = $okButton
+  $dialog.CancelButton = $cancelButton
+
+  $result = $dialog.ShowDialog($Owner)
+  if ($result -eq [System.Windows.Forms.DialogResult]::OK -and $candidateListBox.SelectedItem) {
+    return [string]$candidateListBox.SelectedItem
+  }
+
+  return [string]$SelectionContext.RecommendedPath
 }
 
 function Show-GeneratorUi {
@@ -620,7 +1122,12 @@ function Show-GeneratorUi {
         throw "请先选择要处理的 questa/modelsim 目录。"
       }
 
-      $result = Generate-MySimArtifacts -SimulatorDir $selectedDir -OutTclName $OutTclName -OutBatName $OutBatName -LogBox $logTextBox
+      $candidateSelectionCallback = {
+        param($SelectionContext)
+        return Show-MemoryCandidateSelectionDialog -Owner $form -SelectionContext $SelectionContext
+      }
+
+      $result = Generate-MySimArtifacts -SimulatorDir $selectedDir -OutTclName $OutTclName -OutBatName $OutBatName -LogBox $logTextBox -CandidateSelectionCallback $candidateSelectionCallback
       $statusLabel.Text = "生成完成，输出位于上一级目录。"
       Write-GenerationLog -Message "请注意放置位置 / Keep the generated BAT and TCL in: $($result.OutputDir)" -LogBox $logTextBox
       Show-GenerationCompletion -Owner $form -Result $result
