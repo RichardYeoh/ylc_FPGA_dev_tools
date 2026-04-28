@@ -31,34 +31,45 @@ class RemoveDebugFlagsTests(unittest.TestCase):
         self.assertEqual(stats.dont_touch_removed, 1)
         self.assertEqual(stats.dont_touch_preserved, 1)
 
-    def test_verilog_keeps_other_attributes_and_ignores_comments(self) -> None:
+    def test_verilog_removes_companion_keep_and_ignores_comments(self) -> None:
         source = (
             'assign a = 1\'b0;\n'
             '(* keep="true", MARK_DEBUG = "TRUE" *) wire sig;\n'
+            '(* keep="true" *) wire keep_only;\n'
             '// (* MARK_DEBUG="true" *) wire comment_sig;\n'
             'initial $display("MARK_DEBUG");\n'
         )
         result, stats = transform_verilog(source, self.make_options())
-        self.assertIn('(* keep="true" *) wire sig;', result)
+        self.assertIn('wire sig;', result)
+        self.assertIn('(* keep="true" *) wire keep_only;', result)
         self.assertIn('// (* MARK_DEBUG="true" *) wire comment_sig;', result)
         self.assertIn('"MARK_DEBUG"', result)
         self.assertEqual(stats.mark_debug_removed, 1)
+        self.assertEqual(stats.keep_removed, 1)
+        self.assertEqual(stats.keep_preserved, 1)
 
-    def test_vhdl_removes_mark_debug_and_companion_dont_touch(self) -> None:
+    def test_vhdl_removes_mark_debug_and_companion_dont_touch_keep(self) -> None:
         source = (
             "attribute mark_debug : string;\n"
             "attribute dont_touch : string;\n"
+            "attribute keep : string;\n"
             "attribute mark_debug of pix_cnt : signal is \"true\";\n"
             "attribute dont_touch of pix_cnt : signal is \"true\";\n"
+            "attribute keep of pix_cnt : signal is \"true\";\n"
             "attribute dont_touch of keep_me : signal is \"true\";\n"
+            "attribute keep of keep_me : signal is \"true\";\n"
         )
         result, stats = transform_vhdl(source, self.make_options())
         self.assertNotIn("mark_debug", result.lower())
         self.assertIn("attribute dont_touch : string;", result)
+        self.assertIn("attribute keep : string;", result)
         self.assertIn("attribute dont_touch of keep_me : signal is \"true\";", result)
+        self.assertIn("attribute keep of keep_me : signal is \"true\";", result)
         self.assertNotIn("attribute dont_touch of pix_cnt", result)
+        self.assertNotIn("attribute keep of pix_cnt", result)
         self.assertEqual(stats.mark_debug_removed, 2)
         self.assertEqual(stats.dont_touch_removed, 1)
+        self.assertEqual(stats.keep_removed, 1)
 
     def test_apply_backup_uses_parallel_debug_version_tree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -72,6 +83,18 @@ class RemoveDebugFlagsTests(unittest.TestCase):
             self.assertTrue(backup_file.exists())
             self.assertIn("MARK_DEBUG", backup_file.read_text(encoding="utf-8"))
             self.assertNotIn("MARK_DEBUG", source_file.read_text(encoding="utf-8"))
+
+    def test_apply_preserves_utf8_without_bom(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rtl_root = Path(temp_dir) / "rtl"
+            source_file = rtl_root / "demo.v"
+            source_file.parent.mkdir(parents=True)
+            source_file.write_bytes('(* MARK_DEBUG="true" *)reg demo; // 中文\n'.encode("utf-8"))
+            report = run_clean(CleanOptions(root=rtl_root, apply_changes=True, create_backup=False), on_log=lambda _msg: None)
+            updated = source_file.read_bytes()
+            self.assertEqual(len(report.changed_files), 1)
+            self.assertFalse(updated.startswith(b"\xef\xbb\xbf"))
+            self.assertNotIn(b"MARK_DEBUG", updated)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,19 @@ from tkinter.scrolledtext import ScrolledText
 RTL_EXTENSIONS = {".v", ".sv", ".vh", ".svh", ".vhd", ".vhdl"}
 VERILOG_EXTENSIONS = {".v", ".sv", ".vh", ".svh"}
 VHDL_EXTENSIONS = {".vhd", ".vhdl"}
-ENCODING_CANDIDATES = ("utf-8-sig", "utf-8", "gb18030", "gbk", "gb2312")
+UTF8_BOM = b"\xef\xbb\xbf"
+UTF16_LE_BOM = b"\xff\xfe"
+UTF16_BE_BOM = b"\xfe\xff"
+UTF32_LE_BOM = b"\xff\xfe\x00\x00"
+UTF32_BE_BOM = b"\x00\x00\xfe\xff"
+BOM_ENCODINGS = (
+    (UTF8_BOM, "utf-8-sig"),
+    (UTF32_LE_BOM, "utf-32"),
+    (UTF32_BE_BOM, "utf-32"),
+    (UTF16_LE_BOM, "utf-16"),
+    (UTF16_BE_BOM, "utf-16"),
+)
+TEXT_ENCODING_CANDIDATES = ("utf-8", "gb18030", "gbk", "gb2312")
 FONT_NAME = "Microsoft YaHei UI"
 LOG_FONT = "Consolas"
 THEME = {
@@ -48,10 +60,12 @@ class TransformStats:
     mark_debug_removed: int = 0
     dont_touch_removed: int = 0
     dont_touch_preserved: int = 0
+    keep_removed: int = 0
+    keep_preserved: int = 0
 
     @property
     def changed(self) -> bool:
-        return self.mark_debug_removed > 0 or self.dont_touch_removed > 0
+        return self.mark_debug_removed > 0 or self.dont_touch_removed > 0 or self.keep_removed > 0
 
 
 @dataclass
@@ -77,6 +91,8 @@ class RunReport:
     mark_debug_removed: int = 0
     dont_touch_removed: int = 0
     dont_touch_preserved: int = 0
+    keep_removed: int = 0
+    keep_preserved: int = 0
     duration_sec: float = 0.0
     cancelled: bool = False
 
@@ -87,6 +103,7 @@ class RunReport:
             "changed": len(self.changed_files),
             "mark_debug": self.mark_debug_removed,
             "dont_touch": self.dont_touch_removed,
+            "keep": self.keep_removed,
             "failures": len(self.failed_files),
             "backups": len(self.backup_files),
         }
@@ -107,7 +124,7 @@ def is_vhdl_file(path: Path) -> bool:
 def is_probably_binary(data: bytes) -> bool:
     if not data:
         return False
-    if data.startswith((b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff", b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+    if any(data.startswith(signature) for signature, _encoding in BOM_ENCODINGS):
         return False
     if b"\x00" in data:
         return True
@@ -117,8 +134,11 @@ def is_probably_binary(data: bytes) -> bool:
 
 
 def decode_source(data: bytes) -> tuple[str, str]:
+    for signature, encoding in BOM_ENCODINGS:
+        if data.startswith(signature):
+            return data.decode(encoding), encoding
     last_error: Exception | None = None
-    for encoding in ENCODING_CANDIDATES:
+    for encoding in TEXT_ENCODING_CANDIDATES:
         try:
             return data.decode(encoding), encoding
         except UnicodeDecodeError as exc:
@@ -165,7 +185,12 @@ def get_attribute_name(item: str) -> str | None:
     return match.group(1).lower()
 
 
-def process_attribute_content(content: str, remove_dont_touch: bool, stats: TransformStats) -> str | None:
+def process_attribute_content(
+    content: str,
+    remove_dont_touch: bool,
+    remove_keep: bool,
+    stats: TransformStats,
+) -> str | None:
     kept_items: list[str] = []
     for item in split_attribute_items(content):
         name = get_attribute_name(item)
@@ -177,6 +202,11 @@ def process_attribute_content(content: str, remove_dont_touch: bool, stats: Tran
                 stats.dont_touch_removed += 1
                 continue
             stats.dont_touch_preserved += 1
+        if name == "keep":
+            if remove_keep:
+                stats.keep_removed += 1
+                continue
+            stats.keep_preserved += 1
         if item.strip():
             kept_items.append(item.strip())
     if not kept_items:
@@ -306,14 +336,16 @@ def transform_verilog(text: str, options: CleanOptions) -> tuple[str, TransformS
                 continue
             has_mark_debug = attribute_group_has_name(blocks, "mark_debug")
             has_dont_touch = attribute_group_has_name(blocks, "dont_touch")
+            has_keep = attribute_group_has_name(blocks, "keep")
             remove_dont_touch = options.remove_all_dont_touch or has_mark_debug
+            remove_keep = has_mark_debug
             if has_mark_debug or (options.remove_all_dont_touch and has_dont_touch):
                 start_line = text.count("\n", 0, index)
                 end_line = text.count("\n", 0, group_end)
                 touched_lines.update(range(start_line, end_line + 1))
                 rebuilt_blocks: list[str] = []
                 for _, _, content in blocks:
-                    rebuilt = process_attribute_content(content, remove_dont_touch, stats)
+                    rebuilt = process_attribute_content(content, remove_dont_touch, remove_keep, stats)
                     if rebuilt is not None:
                         rebuilt_blocks.append(rebuilt)
                 replacement = " ".join(rebuilt_blocks)
@@ -332,6 +364,11 @@ def transform_verilog(text: str, options: CleanOptions) -> tuple[str, TransformS
                     for item in split_attribute_items(content):
                         if get_attribute_name(item) == "dont_touch":
                             stats.dont_touch_preserved += 1
+            if has_keep:
+                for _, _, content in blocks:
+                    for item in split_attribute_items(content):
+                        if get_attribute_name(item) == "keep":
+                            stats.keep_preserved += 1
             output.append(text[index:group_end])
             index = group_end
             continue
@@ -347,9 +384,9 @@ def transform_verilog(text: str, options: CleanOptions) -> tuple[str, TransformS
     return new_text, stats
 
 
-VHDL_ATTR_DECL_RE = re.compile(r"^\s*attribute\s+(mark_debug|dont_touch)\s*:\s*\w+\s*;\s*$", re.IGNORECASE)
+VHDL_ATTR_DECL_RE = re.compile(r"^\s*attribute\s+(mark_debug|dont_touch|keep)\s*:\s*\w+\s*;\s*$", re.IGNORECASE)
 VHDL_ATTR_SPEC_RE = re.compile(
-    r"^\s*attribute\s+(mark_debug|dont_touch)\s+of\s+(.+?)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s+is\s+(.+?)\s*;\s*$",
+    r"^\s*attribute\s+(mark_debug|dont_touch|keep)\s+of\s+(.+?)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s+is\s+(.+?)\s*;\s*$",
     re.IGNORECASE,
 )
 
@@ -395,6 +432,7 @@ def transform_vhdl(text: str, options: CleanOptions) -> tuple[str, TransformStat
     lines = text.splitlines(keepends=True)
     mark_debug_objects: set[tuple[str, str]] = set()
     dont_touch_objects: set[tuple[str, str]] = set()
+    keep_objects: set[tuple[str, str]] = set()
 
     for line in lines:
         spec = get_vhdl_attr_spec(line)
@@ -405,9 +443,13 @@ def transform_vhdl(text: str, options: CleanOptions) -> tuple[str, TransformStat
             mark_debug_objects.add(key)
         elif attr_name == "dont_touch":
             dont_touch_objects.add(key)
+        elif attr_name == "keep":
+            keep_objects.add(key)
 
     remove_dont_touch_objects = dont_touch_objects if options.remove_all_dont_touch else mark_debug_objects & dont_touch_objects
     keep_dont_touch_objects = dont_touch_objects - remove_dont_touch_objects
+    remove_keep_objects = mark_debug_objects & keep_objects
+    keep_keep_objects = keep_objects - remove_keep_objects
     output: list[str] = []
     for line in lines:
         ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
@@ -426,6 +468,9 @@ def transform_vhdl(text: str, options: CleanOptions) -> tuple[str, TransformStat
             if attr_name == "dont_touch" and remove_dont_touch_objects and not keep_dont_touch_objects:
                 stats.dont_touch_removed += 1
                 continue
+            if attr_name == "keep" and remove_keep_objects and not keep_keep_objects:
+                stats.keep_removed += 1
+                continue
         spec = get_vhdl_attr_spec(line)
         if spec is not None:
             attr_name, key = spec
@@ -437,6 +482,11 @@ def transform_vhdl(text: str, options: CleanOptions) -> tuple[str, TransformStat
                     stats.dont_touch_removed += 1
                     continue
                 stats.dont_touch_preserved += 1
+            if attr_name == "keep":
+                if key in remove_keep_objects:
+                    stats.keep_removed += 1
+                    continue
+                stats.keep_preserved += 1
         output.append(code.rstrip(" \t") + comment + ending)
 
     if not stats.changed:
@@ -493,6 +543,7 @@ def process_one_file(path: Path, options: CleanOptions) -> FileReport:
     if new_text == text:
         stats.mark_debug_removed = 0
         stats.dont_touch_removed = 0
+        stats.keep_removed = 0
         return FileReport(path=path, changed=False, stats=stats)
     if not options.apply_changes:
         return FileReport(path=path, changed=True, stats=stats)
@@ -521,6 +572,8 @@ def merge_file_report(run_report: RunReport, file_report: FileReport) -> None:
     run_report.mark_debug_removed += file_report.stats.mark_debug_removed
     run_report.dont_touch_removed += file_report.stats.dont_touch_removed
     run_report.dont_touch_preserved += file_report.stats.dont_touch_preserved
+    run_report.keep_removed += file_report.stats.keep_removed
+    run_report.keep_preserved += file_report.stats.keep_preserved
     if file_report.changed:
         run_report.changed_files.append(file_report.path)
     if file_report.backup_path is not None:
@@ -576,7 +629,8 @@ def run_clean(
             log(
                 f"[{action}] {path} "
                 f"(MARK_DEBUG -{file_report.stats.mark_debug_removed}, "
-                f"dont_touch -{file_report.stats.dont_touch_removed}{backup_note})"
+                f"dont_touch -{file_report.stats.dont_touch_removed}, "
+                f"KEEP -{file_report.stats.keep_removed}{backup_note})"
             )
         if on_progress is not None:
             on_progress(index, len(files), report.snapshot())
@@ -601,6 +655,8 @@ def format_summary(report: RunReport, backup_root: Path) -> str:
         f"删除 MARK_DEBUG: {report.mark_debug_removed}\n"
         f"删除 dont_touch: {report.dont_touch_removed}\n"
         f"保留独立 dont_touch: {report.dont_touch_preserved}\n"
+        f"删除 KEEP: {report.keep_removed}\n"
+        f"保留独立 KEEP: {report.keep_preserved}\n"
         f"备份文件: {len(report.backup_files)}\n"
         f"跳过文件: {len(report.skipped_files)}\n"
         f"失败文件: {len(report.failed_files)}\n"
@@ -633,7 +689,7 @@ class RemoveDebugFlagsApp:
         self.status_var = tk.StringVar(value="等待扫描")
         self.metric_vars = {
             key: tk.StringVar(value="0")
-            for key in ("total", "scanned", "changed", "mark_debug", "dont_touch", "failures", "backups")
+            for key in ("total", "scanned", "changed", "mark_debug", "dont_touch", "keep", "failures", "backups")
         }
         self._setup_styles()
         self._build_ui()
@@ -669,7 +725,7 @@ class RemoveDebugFlagsApp:
         hero.pack(fill=tk.X)
         ttk.Label(hero, text="RTL DEBUG CLEANER", style="HeroSmall.TLabel").pack(anchor=tk.W)
         ttk.Label(hero, text="RTL Debug 标记清理工具", style="HeroTitle.TLabel").pack(anchor=tk.W, pady=(6, 4))
-        ttk.Label(hero, text="递归扫描 Verilog/SystemVerilog/VHDL 源码，清除 MARK_DEBUG 及配套 dont_touch。", style="HeroText.TLabel").pack(anchor=tk.W)
+        ttk.Label(hero, text="递归扫描 Verilog/SystemVerilog/VHDL 源码，清除 MARK_DEBUG 及配套 dont_touch/KEEP。", style="HeroText.TLabel").pack(anchor=tk.W)
 
         body = ttk.Frame(container, style="App.TFrame")
         body.pack(fill=tk.BOTH, expand=True, pady=(16, 0))
@@ -715,10 +771,10 @@ class RemoveDebugFlagsApp:
         ttk.Checkbutton(options, text="写回前备份到 debug_version", variable=self.backup_var, style="Modern.TCheckbutton").grid(row=3, column=0, sticky="w", pady=(8, 0))
         ttk.Checkbutton(options, text="移除全部 dont_touch", variable=self.remove_all_dont_touch_var, style="Modern.TCheckbutton").grid(row=4, column=0, sticky="w", pady=(8, 0))
         ttk.Checkbutton(options, text="局部整理空白", variable=self.align_var, style="Modern.TCheckbutton").grid(row=5, column=0, sticky="w", pady=(8, 0))
-        ttk.Label(options, text="未勾选写回时只做预览，不修改 RTL。默认仅删除与 MARK_DEBUG 伴随的 dont_touch。", style="Hint.TLabel", wraplength=330).grid(row=6, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(options, text="未勾选写回时只做预览，不修改 RTL。默认仅删除与 MARK_DEBUG 伴随的 dont_touch 和 KEEP。", style="Hint.TLabel", wraplength=330).grid(row=6, column=0, sticky="w", pady=(12, 0))
 
         summary = self._make_card(body, 1, 1, "结果概览", "执行过程中持续刷新关键统计。")
-        metrics = [("候选", "total"), ("已扫", "scanned"), ("命中", "changed"), ("MARK_DEBUG", "mark_debug"), ("dont_touch", "dont_touch"), ("失败", "failures"), ("备份", "backups")]
+        metrics = [("候选", "total"), ("已扫", "scanned"), ("命中", "changed"), ("MARK_DEBUG", "mark_debug"), ("dont_touch", "dont_touch"), ("KEEP", "keep"), ("失败", "failures"), ("备份", "backups")]
         for index, (label, key) in enumerate(metrics):
             block = ttk.Frame(summary, style="Card.TFrame")
             block.grid(row=2 + index // 2, column=index % 2, sticky="w", padx=(0, 18), pady=(10 if index < 2 else 12, 0))
@@ -730,8 +786,8 @@ class RemoveDebugFlagsApp:
             "处理范围:\n"
             "1. Verilog/SystemVerilog: (* MARK_DEBUG ... *)\n"
             "2. VHDL: attribute mark_debug ...\n"
-            "3. 默认移除配套 dont_touch\n"
-            "4. 保留独立 dont_touch\n"
+            "3. 默认移除配套 dont_touch/KEEP\n"
+            "4. 保留独立 dont_touch/KEEP\n"
             "5. 注释和字符串中的关键字不处理\n"
             "6. 写回前按相对路径备份到 debug_version"
         )
@@ -863,6 +919,7 @@ class RemoveDebugFlagsApp:
             f"命中文件: {len(result.changed_files)}\n"
             f"删除 MARK_DEBUG: {result.mark_debug_removed}\n"
             f"删除 dont_touch: {result.dont_touch_removed}\n"
+            f"删除 KEEP: {result.keep_removed}\n"
             f"备份文件: {len(result.backup_files)}\n"
             f"失败文件: {len(result.failed_files)}"
         )
