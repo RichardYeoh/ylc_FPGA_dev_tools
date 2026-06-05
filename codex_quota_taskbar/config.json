@@ -1,0 +1,54 @@
+{
+    "window": {
+    "width": 146,
+    "height": 44,
+    "auto_size": true,
+    "margin_x": 96,
+    "margin_y": 4,
+    "dock_gap": 8,
+    "dock_offset_x": 4,
+    "position": "taskbar_docked",
+    "opacity": 1.0,
+    "transparent_background": true,
+    "transparent_color": "#dceff5",
+    "background": "#dceff5",
+    "click_through": true,
+    "pad_x": 0,
+    "pad_y": 0,
+    "column_gap": 1,
+    "font_family": "Consolas",
+    "font_size": 10,
+    "text_color": "#4f5f66",
+    "warning_color": "#7a6048",
+    "critical_color": "#7a4f55",
+    "unknown_color": "#667178"
+  },
+  "quota": {
+    "state_file": "quota_state.json",
+    "cache_file": "quota_cache.json",
+    "refresh_seconds": 2,
+    "api_refresh_seconds": 300,
+    "use_live_api": true,
+    "provider_command": []
+  },
+  "watcher": {
+    "poll_seconds": 5,
+    "close_when_codex_exits": false,
+    "process_patterns": [
+      "codex.exe",
+      "codex.cmd",
+      "@openai\\\\codex",
+      "openai.chatgpt",
+      "codex app",
+      "codex"
+    ],
+    "vscode_patterns": [
+      "code.exe"
+    ],
+    "desktop_patterns": [
+      "codex.exe",
+      "chatgpt.exe",
+      "openai"
+    ]
+  }
+}
