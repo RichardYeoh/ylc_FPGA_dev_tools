@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from codex_quota_provider import load_snapshot
-from codex_quota_taskbar import project_root
+from codex_quota_taskbar import project_root, to_hong_kong_time
 
 
 def main() -> int:
@@ -9,6 +11,8 @@ def main() -> int:
     snapshot = load_snapshot(project_root())
     assert snapshot.five_hour.key == "5h"
     assert snapshot.weekly.key == "weekly"
+    assert to_hong_kong_time(datetime(2026, 6, 5, 13, 0, tzinfo=timezone.utc)).strftime("%Y-%m-%d %H:%M") == "2026-06-05 21:00"
+    assert to_hong_kong_time(datetime(2026, 6, 11, 3, 0, tzinfo=timezone.utc)).strftime("%Y-%m-%d %H:%M") == "2026-06-11 11:00"
     print("snapshot_ok", snapshot.source, snapshot.five_hour.remaining_text, snapshot.weekly.remaining_text)
     return 0
 

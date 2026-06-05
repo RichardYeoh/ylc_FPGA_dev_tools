@@ -32,8 +32,8 @@
     "provider_command": []
   },
   "watcher": {
-    "poll_seconds": 5,
-    "close_when_codex_exits": false,
+    "poll_seconds": 15,
+    "close_when_codex_exits": true,
     "process_patterns": [
       "codex.exe",
       "codex.cmd",

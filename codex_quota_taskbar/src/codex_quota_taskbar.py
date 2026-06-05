@@ -4,7 +4,7 @@ import ctypes
 import os
 import sys
 import tkinter as tk
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from ctypes import wintypes
 
@@ -29,6 +29,7 @@ SWP_SHOWWINDOW = 0x0040
 SM_CXSCREEN = 0
 SM_CYSCREEN = 1
 ERROR_ALREADY_EXISTS = 183
+HONG_KONG_TZ = timezone(timedelta(hours=8), "HKT")
 
 
 class RECT(ctypes.Structure):
@@ -162,13 +163,19 @@ def parse_hwnd(value: object) -> int:
         return 0
 
 
+def to_hong_kong_time(dt: datetime) -> datetime:
+    # Display all reset windows in Hong Kong time / 所有复位窗口统一按香港时间显示
+    return dt.astimezone(HONG_KONG_TZ) if dt.tzinfo else dt.replace(tzinfo=HONG_KONG_TZ)
+
+
 def format_reset_time(dt: datetime | None) -> str:
     if dt is None:
         return "--:--"
-    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
-    if dt.date() == now.date():
-        return dt.strftime("%H:%M")
-    return dt.strftime("%m/%d %H")
+    display_dt = to_hong_kong_time(dt)
+    now = datetime.now(HONG_KONG_TZ)
+    if display_dt.date() == now.date():
+        return display_dt.strftime("%H:%M")
+    return display_dt.strftime("%m/%d %H")
 
 
 def quota_value_color(snapshot: QuotaSnapshot, window_cfg: dict) -> str:

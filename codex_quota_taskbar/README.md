@@ -8,6 +8,8 @@ OpenAI 官方帮助文档说明可在 Codex usage page 或 limit banner 查看 C
 
 本工具默认采用同类思路：优先通过本地 Codex OAuth 状态实时读取接口，接口失败时回退到项目内 `quota_cache.json`，再失败才回退到 `quota_state.json`。不会把本地 token 统计伪装成官方余量。
 
+接口返回的复位时间按原始 UTC 时间缓存，显示层统一换算为香港时间 `UTC+08:00`；因此当天判断、跨日日期和 `5h`/weekly 复位时间都按香港时间显示。
+
 ```json
 {
   "windows": {
@@ -48,7 +50,7 @@ python .\src\codex_quota_taskbar.py
 
 ## Codex 联动启动
 
-监听器会扫描 `codex.exe`、`@openai\codex`、VS Code OpenAI/Codex/ChatGPT 扩展宿主、Codex/ChatGPT 桌面相关进程。发现后启动显示窗，默认不会在 Codex 退出时关闭显示窗。
+监听器默认每 15 秒扫描一次 `codex.exe`、`@openai\codex`、VS Code OpenAI/Codex/ChatGPT 扩展宿主、Codex/ChatGPT 桌面相关进程。发现后启动显示窗，默认不会在 Codex 退出时关闭显示窗。
 
 ```powershell
 .\scripts\run_watcher.ps1
