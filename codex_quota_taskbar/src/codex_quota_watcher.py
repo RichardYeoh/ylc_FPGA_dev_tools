@@ -66,16 +66,31 @@ def contains_any(text: str, patterns: list[str]) -> bool:
     return any(pattern.lower() in text_l for pattern in patterns)
 
 
-def app_is_running(processes: list[tuple[str, str]]) -> bool:
+def is_own_tool_process(cmd: str, root: Path) -> bool:
+    # Do not classify this utility as Codex just because its path contains "codex" / 不因本工具路径包含 codex 而误判为 Codex
+    cmd_l = cmd.lower()
+    root_l = str(root).lower()
+    return root_l in cmd_l and (
+        "codex_quota_taskbar.py" in cmd_l
+        or "codex_quota_watcher.py" in cmd_l
+        or "scripts\\run_watcher.ps1" in cmd_l
+        or "scripts\\run_app.ps1" in cmd_l
+    )
+
+
+def app_is_running(processes: list[tuple[str, str]], root: Path) -> bool:
     # Detect this UI script by command line / 通过命令行检测本 UI 脚本是否已运行
-    return any("codex_quota_taskbar.py" in cmd.lower() for _name, cmd in processes)
+    root_l = str(root).lower()
+    return any("codex_quota_taskbar.py" in cmd.lower() and root_l in cmd.lower() for _name, cmd in processes)
 
 
-def codex_is_running(processes: list[tuple[str, str]], watcher_cfg: dict) -> bool:
+def codex_is_running(processes: list[tuple[str, str]], watcher_cfg: dict, root: Path) -> bool:
     process_patterns = watcher_cfg.get("process_patterns", [])
     vscode_patterns = watcher_cfg.get("vscode_patterns", [])
     desktop_patterns = watcher_cfg.get("desktop_patterns", [])
     for name, cmd in processes:
+        if is_own_tool_process(cmd, root):
+            continue
         text = f"{name} {cmd}"
         if contains_any(text, process_patterns):
             return True
@@ -99,10 +114,12 @@ def launch_app(root: Path) -> None:
     )
 
 
-def stop_app(processes: list[tuple[str, str]]) -> None:
+def stop_app(processes: list[tuple[str, str]], root: Path) -> None:
     # Conservative cleanup by script command line / 按脚本命令行进行保守清理
+    root_s = str(root)
     for _name, cmd in processes:
-        if "codex_quota_taskbar.py" not in cmd.lower():
+        cmd_l = cmd.lower()
+        if "codex_quota_taskbar.py" not in cmd_l or root_s.lower() not in cmd_l:
             continue
         subprocess.run(
             [
@@ -111,7 +128,10 @@ def stop_app(processes: list[tuple[str, str]]) -> None:
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
-                "$p = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*codex_quota_taskbar.py*' }; "
+                "$root = '"
+                + root_s.replace("'", "''")
+                + "'; "
+                "$p = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*codex_quota_taskbar.py*' -and $_.CommandLine -like \"*$root*\" }; "
                 "$p | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
             ],
             stdout=subprocess.DEVNULL,
@@ -132,12 +152,12 @@ def main() -> int:
     close_when_codex_exits = bool(watcher_cfg.get("close_when_codex_exits", False))
     while True:
         processes = query_processes()
-        codex_seen = codex_is_running(processes, watcher_cfg)
-        app_seen = app_is_running(processes)
+        codex_seen = codex_is_running(processes, watcher_cfg, root)
+        app_seen = app_is_running(processes, root)
         if codex_seen and not app_seen:
             launch_app(root)
         if close_when_codex_exits and app_seen and not codex_seen:
-            stop_app(processes)
+            stop_app(processes, root)
         time.sleep(poll_seconds)
 
 

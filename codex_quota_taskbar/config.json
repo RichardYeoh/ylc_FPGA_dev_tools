@@ -39,8 +39,7 @@
       "codex.cmd",
       "@openai\\\\codex",
       "openai.chatgpt",
-      "codex app",
-      "codex"
+      "codex app"
     ],
     "vscode_patterns": [
       "code.exe"
