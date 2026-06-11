@@ -27,7 +27,7 @@
     "state_file": "quota_state.json",
     "cache_file": "quota_cache.json",
     "refresh_seconds": 2,
-    "api_refresh_seconds": 300,
+    "api_refresh_seconds": 150,
     "use_live_api": true,
     "provider_command": []
   },

@@ -8,6 +8,8 @@ OpenAI 官方帮助文档说明可在 Codex usage page 或 limit banner 查看 C
 
 本工具默认采用同类思路：优先通过本地 Codex OAuth 状态实时读取接口，接口失败时回退到项目内 `quota_cache.json`，再失败才回退到 `quota_state.json`。不会把本地 token 统计伪装成官方余量。
 
+默认界面每 2 秒刷新本地显示；实时接口结果最多缓存 150 秒，用于减少后台请求频率。
+
 接口返回的复位时间按原始 UTC 时间缓存，显示层统一换算为香港时间 `UTC+08:00`；因此当天判断、跨日日期和 `5h`/weekly 复位时间都按香港时间显示。
 
 ```json
