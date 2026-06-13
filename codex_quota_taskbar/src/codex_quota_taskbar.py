@@ -30,6 +30,30 @@ SM_CXSCREEN = 0
 SM_CYSCREEN = 1
 ERROR_ALREADY_EXISTS = 183
 HONG_KONG_TZ = timezone(timedelta(hours=8), "HKT")
+BITMAP_GLYPH_HEIGHT = 6
+BITMAP_CELL_WIDTH = 4
+
+BITMAP_GLYPHS = {
+    " ": ["00", "00", "00", "00", "00", "00"],
+    "-": ["0000", "0000", "1111", "0000", "0000", "0000"],
+    "/": ["0001", "0010", "0010", "0100", "1000", "1000"],
+    ":": ["00", "11", "00", "00", "11", "00"],
+    "%": ["1001", "1001", "0010", "0100", "1001", "1001"],
+    "0": ["0110", "1001", "1001", "1001", "1001", "0110"],
+    "1": ["0100", "1100", "0100", "0100", "0100", "1110"],
+    "2": ["1110", "0001", "0010", "0100", "1000", "1111"],
+    "3": ["1110", "0001", "0110", "0001", "0001", "1110"],
+    "4": ["0010", "0110", "1010", "1111", "0010", "0010"],
+    "5": ["1111", "1000", "1110", "0001", "1001", "0110"],
+    "6": ["0110", "1000", "1110", "1001", "1001", "0110"],
+    "7": ["1111", "0001", "0010", "0100", "0100", "0100"],
+    "8": ["0110", "1001", "0110", "1001", "1001", "0110"],
+    "9": ["0110", "1001", "1001", "0111", "0001", "0110"],
+    "E": ["1111", "1000", "1110", "1000", "1000", "1111"],
+    "H": ["1001", "1001", "1111", "1001", "1001", "1001"],
+    "R": ["1110", "1001", "1110", "1010", "1001", "1001"],
+    "W": ["10001", "10001", "10101", "10101", "10101", "01010"],
+}
 
 
 class RECT(ctypes.Structure):
@@ -194,6 +218,61 @@ def quota_value_color(snapshot: QuotaSnapshot, window_cfg: dict) -> str:
     return str(window_cfg.get("text_color", "#111827"))
 
 
+def display_label(label: str) -> str:
+    return "5H" if label == "5h" else label
+
+
+def display_remaining_text(text: str) -> str:
+    if text.endswith("%"):
+        return text[:-1]
+    return text
+
+
+def format_display_line(label: str, remaining_text: str, reset_at: datetime | None) -> str:
+    return f"{display_label(label):>2} {display_remaining_text(remaining_text):>3} {format_reset_time(reset_at)}"
+
+
+def bitmap_lines_size(
+    lines: list[str],
+    scale: int,
+    char_gap: int,
+    line_gap: int,
+    cell_width: int = BITMAP_CELL_WIDTH,
+) -> tuple[int, int]:
+    widths = []
+    glyph_h = BITMAP_GLYPH_HEIGHT * scale
+    cell_advance = cell_width * scale + char_gap
+    for line in lines:
+        widths.append(max(1, len(line) * cell_advance - char_gap))
+    return max(widths, default=1), max(1, len(lines) * glyph_h + max(0, len(lines) - 1) * line_gap)
+
+
+def draw_bitmap_lines(
+    image: tk.PhotoImage,
+    lines: list[str],
+    foreground: str,
+    background: str,
+    scale: int,
+    char_gap: int,
+    line_gap: int,
+    cell_width: int = BITMAP_CELL_WIDTH,
+) -> None:
+    width, height = bitmap_lines_size(lines, scale, char_gap, line_gap, cell_width)
+    image.put(background, to=(0, 0, width, height))
+    y = 0
+    cell_advance = cell_width * scale + char_gap
+    for line in lines:
+        x = 0
+        for char in line:
+            glyph = BITMAP_GLYPHS.get(char, BITMAP_GLYPHS[" "])
+            for gy, row in enumerate(glyph):
+                for gx, pixel in enumerate(row):
+                    if pixel == "1":
+                        image.put(foreground, to=(x + gx * scale, y + gy * scale, x + (gx + 1) * scale, y + (gy + 1) * scale))
+            x += cell_advance
+        y += BITMAP_GLYPH_HEIGHT * scale + line_gap
+
+
 class QuotaTaskbarWindow:
     def __init__(self) -> None:
         self.root_dir = project_root()
@@ -204,6 +283,7 @@ class QuotaTaskbarWindow:
         self.taskbar_hwnd = 0
         self.is_taskbar_child = False
         self.transparent_color = str(self.window_cfg.get("transparent_color", "#ff00ff"))
+        self.render_mode = str(self.window_cfg.get("render_mode", "bitmap"))
         self.root = tk.Tk()
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -214,22 +294,35 @@ class QuotaTaskbarWindow:
         else:
             background = str(self.window_cfg.get("background", "#101418"))
         self.root.configure(bg=background)
-        font_family = self.window_cfg.get("font_family", "Consolas")
-        font_size = int(self.window_cfg.get("font_size", 10))
         self.cells: dict[str, tk.Label] = {}
-        self.root.grid_columnconfigure(0, weight=0)
-        self.root.grid_columnconfigure(1, weight=0)
-        self.root.grid_columnconfigure(2, weight=1)
-        for row, key in enumerate(("five", "week")):
-            self.cells[f"{key}_label"] = self.make_cell(row, 0, "5h" if key == "five" else "W", background, font_family, font_size)
-            self.cells[f"{key}_value"] = self.make_cell(row, 1, "--%", background, font_family, font_size)
-            self.cells[f"{key}_time"] = self.make_cell(row, 2, "--:--", background, font_family, font_size)
+        self.bitmap_label: tk.Label | None = None
+        self.bitmap_image: tk.PhotoImage | None = None
+        if self.render_mode == "bitmap":
+            self.bitmap_label = tk.Label(self.root, bg=background, bd=0, padx=0, pady=0)
+            self.bitmap_label.pack(fill="both", expand=True)
+            self.render_bitmap_lines(
+                [format_display_line("5h", "--%", None), format_display_line("W", "--%", None)],
+                str(self.window_cfg.get("unknown_color", "#667178")),
+            )
+        else:
+            font_family = self.window_cfg.get("font_family", "Consolas")
+            font_size = int(self.window_cfg.get("font_size", 10))
+            self.root.grid_columnconfigure(0, weight=0)
+            self.root.grid_columnconfigure(1, weight=0)
+            self.root.grid_columnconfigure(2, weight=1)
+            for row, key in enumerate(("five", "week")):
+                self.cells[f"{key}_label"] = self.make_cell(row, 0, "5H" if key == "five" else "W", background, font_family, font_size)
+                self.cells[f"{key}_value"] = self.make_cell(row, 1, "--", background, font_family, font_size)
+                self.cells[f"{key}_time"] = self.make_cell(row, 2, "--:--", background, font_family, font_size)
         if not self.window_cfg.get("click_through", True):
             self.root.bind("<Button-3>", self.exit_app)
             self.root.bind("<Double-Button-1>", self.toggle_position)
             for cell in self.cells.values():
                 cell.bind("<Button-3>", self.exit_app)
                 cell.bind("<Double-Button-1>", self.toggle_position)
+            if self.bitmap_label is not None:
+                self.bitmap_label.bind("<Button-3>", self.exit_app)
+                self.bitmap_label.bind("<Double-Button-1>", self.toggle_position)
         self.root.after(50, self.apply_window_style)
         self.root.after(100, self.refresh)
 
@@ -255,6 +348,19 @@ class QuotaTaskbarWindow:
         )
         cell.grid(row=row, column=column, sticky="w", padx=(0, int(self.window_cfg.get("column_gap", 2))))
         return cell
+
+    def render_bitmap_lines(self, lines: list[str], color: str) -> None:
+        if self.bitmap_label is None:
+            return
+        scale = max(1, int(self.window_cfg.get("bitmap_scale", 2)))
+        char_gap = max(0, int(self.window_cfg.get("bitmap_char_gap", 1)))
+        line_gap = max(0, int(self.window_cfg.get("bitmap_line_gap", 3)))
+        cell_width = max(1, int(self.window_cfg.get("bitmap_cell_width", BITMAP_CELL_WIDTH)))
+        width, height = bitmap_lines_size(lines, scale, char_gap, line_gap, cell_width)
+        image = tk.PhotoImage(width=width, height=height)
+        draw_bitmap_lines(image, lines, color, self.transparent_color, scale, char_gap, line_gap, cell_width)
+        self.bitmap_image = image
+        self.bitmap_label.configure(image=image, width=width, height=height)
 
     def hwnd(self) -> int:
         # Tk on Windows has an outer frame HWND and an inner child HWND / Windows 下 Tk 同时有外层 frame 窗口和内层 child 窗口
@@ -388,9 +494,18 @@ class QuotaTaskbarWindow:
     def render_snapshot(self, snapshot: QuotaSnapshot) -> None:
         text_color = quota_value_color(snapshot, self.window_cfg)
         rows = (("five", snapshot.five_hour), ("week", snapshot.weekly))
+        if self.render_mode == "bitmap":
+            self.render_bitmap_lines(
+                [
+                    format_display_line(snapshot.five_hour.label, snapshot.five_hour.remaining_text, snapshot.five_hour.reset_at),
+                    format_display_line(snapshot.weekly.label, snapshot.weekly.remaining_text, snapshot.weekly.reset_at),
+                ],
+                text_color,
+            )
+            return
         for key, window in rows:
-            self.cells[f"{key}_label"].configure(text=window.label, fg=text_color)
-            self.cells[f"{key}_value"].configure(text=window.remaining_text, fg=text_color)
+            self.cells[f"{key}_label"].configure(text=display_label(window.label), fg=text_color)
+            self.cells[f"{key}_value"].configure(text=display_remaining_text(window.remaining_text), fg=text_color)
             self.cells[f"{key}_time"].configure(text=format_reset_time(window.reset_at), fg=text_color)
 
     def refresh(self) -> None:
@@ -398,12 +513,18 @@ class QuotaTaskbarWindow:
             snapshot = load_snapshot(self.root_dir)
             self.render_snapshot(snapshot)
         except Exception:
-            self.cells["five_label"].configure(text="5h")
-            self.cells["five_value"].configure(text="ERR", fg=str(self.window_cfg.get("critical_color", "#b91c1c")))
-            self.cells["five_time"].configure(text="--:--")
-            self.cells["week_label"].configure(text="W")
-            self.cells["week_value"].configure(text="ERR", fg=str(self.window_cfg.get("critical_color", "#b91c1c")))
-            self.cells["week_time"].configure(text="--:--")
+            if self.render_mode == "bitmap":
+                self.render_bitmap_lines(
+                    [format_display_line("5h", "ERR", None), format_display_line("W", "ERR", None)],
+                    str(self.window_cfg.get("critical_color", "#b91c1c")),
+                )
+            else:
+                self.cells["five_label"].configure(text="5H")
+                self.cells["five_value"].configure(text="ERR", fg=str(self.window_cfg.get("critical_color", "#b91c1c")))
+                self.cells["five_time"].configure(text="--:--")
+                self.cells["week_label"].configure(text="W")
+                self.cells["week_value"].configure(text="ERR", fg=str(self.window_cfg.get("critical_color", "#b91c1c")))
+                self.cells["week_time"].configure(text="--:--")
         self.place_window()
         interval_ms = max(1, int(self.quota_cfg.get("refresh_seconds", 2))) * 1000
         self.root.after(interval_ms, self.refresh)

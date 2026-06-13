@@ -38,6 +38,8 @@ python .\src\codex_quota_taskbar.py
 
 默认配置启用鼠标穿透，因此提示文字不会拦截任务栏点击，也不会影响系统托盘、音量、网络、时钟等区域的交互。需要关闭显示窗时运行：
 
+默认 `window.render_mode` 为 `bitmap`，使用 1-bit 单色点阵字模绘制配额文字。该模式不做字体抗锯齿，背景通过透明键色移除，只留下实心文字像素，可避免不同机器任务栏底色导致的抗锯齿彩边。需要回退到系统字体时，可将 `render_mode` 改为 `tk`。
+
 ```powershell
 .\scripts\stop_app.ps1
 ```
