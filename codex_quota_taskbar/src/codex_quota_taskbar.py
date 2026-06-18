@@ -380,8 +380,13 @@ class QuotaTaskbarWindow:
         if self.window_cfg.get("click_through", True):
             ex_style |= WS_EX_TRANSPARENT
         user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
-        self.taskbar_hwnd = int(user32.FindWindowW("Shell_TrayWnd", None) or 0)
+        self.refresh_taskbar_handle()
         self.place_window()
+
+    def refresh_taskbar_handle(self) -> None:
+        taskbar_hwnd = int(ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None) or 0)
+        if taskbar_hwnd:
+            self.taskbar_hwnd = taskbar_hwnd
 
     def attach_to_taskbar(self, hwnd: int) -> None:
         user32 = ctypes.windll.user32
@@ -398,6 +403,9 @@ class QuotaTaskbarWindow:
         hwnd = self.hwnd()
         if self.position_mode != "taskbar_docked" and self.is_taskbar_child:
             self.detach_from_taskbar(hwnd)
+        if self.position_mode == "taskbar_docked":
+            # Taskbar can appear after startup or restart later / 任务栏可能晚于窗口启动或后续重启
+            self.refresh_taskbar_handle()
 
         rect, screen_w, screen_h = get_work_area()
         width = int(self.window_cfg.get("width", 116))
