@@ -109,6 +109,11 @@ def build_window(key: str, label: str, raw: dict[str, Any] | None) -> QuotaWindo
     )
 
 
+def has_normalized_window(raw: Any) -> bool:
+    # Accept legacy cache data while detecting an empty weekly window / 兼容旧缓存，同时识别空的 weekly 窗口
+    return isinstance(raw, dict) and any(raw.get(key) is not None for key in ("remaining_fraction", "reset_at"))
+
+
 def run_provider_command(project_root: Path, command: list[str]) -> dict[str, Any] | None:
     if not command:
         return None
@@ -223,15 +228,25 @@ def normalize_api_window(raw: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def has_api_window(raw: Any) -> bool:
+    # A window is meaningful only when the API supplied quota or reset data / 只有接口给出余量或复位数据时，窗口才有实际意义
+    return isinstance(raw, dict) and any(raw.get(key) is not None for key in ("used_percent", "reset_at"))
+
+
 def normalize_api_usage(api_data: dict[str, Any]) -> dict[str, Any]:
     rate_limit = api_data.get("rate_limit") or {}
+    primary_window = rate_limit.get("primary_window")
+    secondary_window = rate_limit.get("secondary_window")
+    has_secondary_window = has_api_window(secondary_window)
     return {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "source": "chatgpt-codex-usage-api",
         "plan": api_data.get("plan_type", "unknown"),
         "windows": {
-            "5h": normalize_api_window(rate_limit.get("primary_window")),
-            "weekly": normalize_api_window(rate_limit.get("secondary_window")),
+            # Legacy APIs provide primary=5h and secondary=weekly / 旧接口为 primary=5h、secondary=weekly
+            "5h": normalize_api_window(primary_window if has_secondary_window else None),
+            # The current one-window API moves weekly quota into primary / 当前单窗口接口将 weekly 配额移入 primary
+            "weekly": normalize_api_window(secondary_window if has_secondary_window else primary_window),
         },
     }
 
@@ -271,9 +286,13 @@ def load_snapshot(project_root: Path) -> QuotaSnapshot:
     state_path = project_root / quota_cfg.get("state_file", "quota_state.json")
     data = provider_data if provider_data is not None else load_json(state_path)
     windows = data.get("windows", {})
+    weekly_raw = windows.get("weekly")
+    if not has_normalized_window(weekly_raw):
+        # Migrate one-window data normalized before the API mapping update / 迁移接口映射更新前写入的单窗口数据
+        weekly_raw = windows.get("5h")
     return QuotaSnapshot(
         source=str(data.get("source", "unknown")),
         updated_at=parse_datetime(data.get("updated_at")),
         five_hour=build_window("5h", "5h", windows.get("5h")),
-        weekly=build_window("weekly", "W", windows.get("weekly")),
+        weekly=build_window("weekly", "W", weekly_raw),
     )

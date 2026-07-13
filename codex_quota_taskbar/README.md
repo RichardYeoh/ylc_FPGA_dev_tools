@@ -1,6 +1,6 @@
 # Codex Quota Taskbar
 
-这是一个 Windows 本地小工具，用于在底部任务栏区域显示 Codex 的 `5h` 余量、周余量和各自复位时间。当前实现使用 Python 标准库，核心界面为透明背景的无边框紧凑窗，默认贴靠到 Windows 任务栏系统托盘左侧，宽度约等于两个普通任务栏图标。
+这是一个 Windows 本地小工具，用于在底部任务栏区域显示 Codex 的 weekly 周余量及复位时间。当前实现使用 Python 标准库，核心界面为透明背景的无边框紧凑窗，默认贴靠到 Windows 任务栏系统托盘左侧。
 
 ## 当前边界
 
@@ -10,16 +10,11 @@ OpenAI 官方帮助文档说明可在 Codex usage page 或 limit banner 查看 C
 
 默认界面每 2 秒刷新本地显示；实时接口结果最多缓存 150 秒，用于减少后台请求频率。
 
-接口返回的复位时间按原始 UTC 时间缓存，显示层统一换算为香港时间 `UTC+08:00`；因此当天判断、跨日日期和 `5h`/weekly 复位时间都按香港时间显示。
+接口返回的复位时间按原始 UTC 时间缓存，显示层统一换算为香港时间 `UTC+08:00`；因此当天判断、跨日日期和 weekly 复位时间都按香港时间显示。provider 会兼容旧版双窗口接口（`secondary_window` 为 weekly）以及当前单窗口接口（`primary_window` 为 weekly）。
 
 ```json
 {
   "windows": {
-    "5h": {
-      "remaining_fraction": 0.72,
-      "remaining_text": "72%",
-      "reset_at": "2026-06-04T21:00:00+08:00"
-    },
     "weekly": {
       "remaining_fraction": 0.63,
       "remaining_text": "63%",
