@@ -203,15 +203,23 @@ def format_reset_time(dt: datetime | None) -> str:
 
 
 def quota_value_color(snapshot: QuotaSnapshot, window_cfg: dict) -> str:
-    # Codex no longer enforces the former five-hour window / Codex 已不再限制原先的五小时窗口
-    remaining_fraction = snapshot.weekly.remaining_fraction
-    if remaining_fraction is None:
+    fractions = [
+        value
+        for value in (snapshot.five_hour.remaining_fraction, snapshot.weekly.remaining_fraction)
+        if value is not None
+    ]
+    if not fractions:
         return str(window_cfg.get("unknown_color", "#374151"))
-    if remaining_fraction <= 0.10:
+    lowest = min(fractions)
+    if lowest <= 0.10:
         return str(window_cfg.get("critical_color", "#b91c1c"))
-    if remaining_fraction <= 0.25:
+    if lowest <= 0.25:
         return str(window_cfg.get("warning_color", "#b45309"))
     return str(window_cfg.get("text_color", "#111827"))
+
+
+def display_label(label: str) -> str:
+    return "5H" if label == "5h" else label
 
 
 def display_remaining_text(text: str) -> str:
@@ -220,9 +228,8 @@ def display_remaining_text(text: str) -> str:
     return text
 
 
-def format_weekly_display_lines(remaining_text: str, reset_at: datetime | None) -> list[str]:
-    # Keep an eight-cell compact block so neither line changes window width / 固定八字符紧凑块，避免任一行改变窗口宽度
-    return [f"W {display_remaining_text(remaining_text):>3}", f"{format_reset_time(reset_at):>8}"]
+def format_display_line(label: str, remaining_text: str, reset_at: datetime | None) -> str:
+    return f"{display_label(label):>2} {display_remaining_text(remaining_text):>3} {format_reset_time(reset_at)}"
 
 
 def bitmap_lines_size(
@@ -294,7 +301,7 @@ class QuotaTaskbarWindow:
             self.bitmap_label = tk.Label(self.root, bg=background, bd=0, padx=0, pady=0)
             self.bitmap_label.pack(fill="both", expand=True)
             self.render_bitmap_lines(
-                format_weekly_display_lines("--%", None),
+                [format_display_line("5h", "--%", None), format_display_line("W", "--%", None)],
                 str(self.window_cfg.get("unknown_color", "#667178")),
             )
         else:
@@ -303,9 +310,10 @@ class QuotaTaskbarWindow:
             self.root.grid_columnconfigure(0, weight=0)
             self.root.grid_columnconfigure(1, weight=0)
             self.root.grid_columnconfigure(2, weight=1)
-            self.cells["week_label"] = self.make_cell(0, 0, "W", background, font_family, font_size)
-            self.cells["week_value"] = self.make_cell(0, 1, "--", background, font_family, font_size)
-            self.cells["week_time"] = self.make_cell(1, 0, "--:--", background, font_family, font_size)
+            for row, key in enumerate(("five", "week")):
+                self.cells[f"{key}_label"] = self.make_cell(row, 0, "5H" if key == "five" else "W", background, font_family, font_size)
+                self.cells[f"{key}_value"] = self.make_cell(row, 1, "--", background, font_family, font_size)
+                self.cells[f"{key}_time"] = self.make_cell(row, 2, "--:--", background, font_family, font_size)
         if not self.window_cfg.get("click_through", True):
             self.root.bind("<Button-3>", self.exit_app)
             self.root.bind("<Double-Button-1>", self.toggle_position)
@@ -493,15 +501,20 @@ class QuotaTaskbarWindow:
 
     def render_snapshot(self, snapshot: QuotaSnapshot) -> None:
         text_color = quota_value_color(snapshot, self.window_cfg)
+        rows = (("five", snapshot.five_hour), ("week", snapshot.weekly))
         if self.render_mode == "bitmap":
             self.render_bitmap_lines(
-                format_weekly_display_lines(snapshot.weekly.remaining_text, snapshot.weekly.reset_at),
+                [
+                    format_display_line(snapshot.five_hour.label, snapshot.five_hour.remaining_text, snapshot.five_hour.reset_at),
+                    format_display_line(snapshot.weekly.label, snapshot.weekly.remaining_text, snapshot.weekly.reset_at),
+                ],
                 text_color,
             )
             return
-        self.cells["week_label"].configure(text="W", fg=text_color)
-        self.cells["week_value"].configure(text=display_remaining_text(snapshot.weekly.remaining_text), fg=text_color)
-        self.cells["week_time"].configure(text=format_reset_time(snapshot.weekly.reset_at), fg=text_color)
+        for key, window in rows:
+            self.cells[f"{key}_label"].configure(text=display_label(window.label), fg=text_color)
+            self.cells[f"{key}_value"].configure(text=display_remaining_text(window.remaining_text), fg=text_color)
+            self.cells[f"{key}_time"].configure(text=format_reset_time(window.reset_at), fg=text_color)
 
     def refresh(self) -> None:
         try:
@@ -510,10 +523,13 @@ class QuotaTaskbarWindow:
         except Exception:
             if self.render_mode == "bitmap":
                 self.render_bitmap_lines(
-                    format_weekly_display_lines("ERR", None),
+                    [format_display_line("5h", "ERR", None), format_display_line("W", "ERR", None)],
                     str(self.window_cfg.get("critical_color", "#b91c1c")),
                 )
             else:
+                self.cells["five_label"].configure(text="5H")
+                self.cells["five_value"].configure(text="ERR", fg=str(self.window_cfg.get("critical_color", "#b91c1c")))
+                self.cells["five_time"].configure(text="--:--")
                 self.cells["week_label"].configure(text="W")
                 self.cells["week_value"].configure(text="ERR", fg=str(self.window_cfg.get("critical_color", "#b91c1c")))
                 self.cells["week_time"].configure(text="--:--")
