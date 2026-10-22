@@ -3,9 +3,11 @@ from __future__ import annotations
 import csv
 import ctypes
 import io
+import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from codex_quota_provider import load_config
@@ -35,9 +37,24 @@ def find_pythonw() -> str:
     return str(exe)
 
 
+def find_powershell() -> str:
+    # Use the OS-stable Windows PowerShell path for process queries / 进程查询使用系统稳定的 Windows PowerShell 路径
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    candidate = Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    return str(candidate) if candidate.exists() else "powershell"
+
+
+def write_startup_log(root: Path, message: str) -> None:
+    try:
+        with (root / "watcher_startup.log").open("a", encoding="utf-8") as log_file:
+            log_file.write(f"{datetime.now(timezone.utc).isoformat()} {message}\n")
+    except OSError:
+        pass
+
+
 def query_processes() -> list[tuple[str, str]]:
     command = [
-        "powershell",
+        find_powershell(),
         "-NoProfile",
         "-ExecutionPolicy",
         "Bypass",
@@ -123,7 +140,7 @@ def stop_app(processes: list[tuple[str, str]], root: Path) -> None:
             continue
         subprocess.run(
             [
-                "powershell",
+                find_powershell(),
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
@@ -142,23 +159,35 @@ def stop_app(processes: list[tuple[str, str]], root: Path) -> None:
 
 
 def main() -> int:
-    mutex = acquire_single_instance("Local\\CodexQuotaTaskbarWatcher")
-    if mutex is None:
-        return 0
     root = project_root()
-    config = load_config(root)
-    watcher_cfg = config.get("watcher", {})
-    poll_seconds = max(2, int(watcher_cfg.get("poll_seconds", 5)))
-    close_when_codex_exits = bool(watcher_cfg.get("close_when_codex_exits", False))
-    while True:
-        processes = query_processes()
-        codex_seen = codex_is_running(processes, watcher_cfg, root)
-        app_seen = app_is_running(processes, root)
-        if codex_seen and not app_seen:
-            launch_app(root)
-        if close_when_codex_exits and app_seen and not codex_seen:
-            stop_app(processes, root)
-        time.sleep(poll_seconds)
+    try:
+        mutex = acquire_single_instance("Local\\CodexQuotaTaskbarWatcher")
+        if mutex is None:
+            return 0
+        config = load_config(root)
+        watcher_cfg = config.get("watcher", {})
+        poll_seconds = max(2, int(watcher_cfg.get("poll_seconds", 5)))
+        close_when_codex_exits = bool(watcher_cfg.get("close_when_codex_exits", False))
+        write_startup_log(
+            root,
+            f"watcher_started poll_seconds={poll_seconds} "
+            f"close_when_codex_exits={close_when_codex_exits}",
+        )
+        while True:
+            try:
+                processes = query_processes()
+                codex_seen = codex_is_running(processes, watcher_cfg, root)
+                app_seen = app_is_running(processes, root)
+                if codex_seen and not app_seen:
+                    launch_app(root)
+                if close_when_codex_exits and app_seen and not codex_seen:
+                    stop_app(processes, root)
+            except Exception as exc:
+                write_startup_log(root, f"poll_failed {type(exc).__name__}: {exc}")
+            time.sleep(poll_seconds)
+    except Exception as exc:
+        write_startup_log(root, f"watcher_failed {type(exc).__name__}: {exc}")
+        return 1
 
 
 if __name__ == "__main__":

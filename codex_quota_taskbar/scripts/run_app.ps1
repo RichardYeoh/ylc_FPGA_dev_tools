@@ -1,10 +1,7 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$PythonExe = (Get-Command python -ErrorAction Stop).Source
-$PythonwExe = Join-Path (Split-Path -Parent $PythonExe) "pythonw.exe"
-if (-not (Test-Path -LiteralPath $PythonwExe)) {
-    $PythonwExe = $PythonExe
-}
+. "$PSScriptRoot\resolve_runtime.ps1"
+$PythonwExe = Resolve-CodexPythonw
 
 # Restart the compact UI so a hidden stale window is recovered / 重启紧凑 UI 以恢复隐藏的旧窗口
 $Processes = Get-CimInstance Win32_Process | Where-Object {

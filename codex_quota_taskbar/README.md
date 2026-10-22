@@ -54,7 +54,9 @@ python .\src\codex_quota_taskbar.py
 
 ## Codex 联动启动
 
-监听器默认每 15 秒扫描一次 `codex.exe`、`@openai\codex`、VS Code OpenAI/Codex/ChatGPT 扩展宿主、Codex/ChatGPT 桌面相关进程。发现后启动显示窗，默认不会在 Codex 退出时关闭显示窗。
+监听器默认每 15 秒扫描一次 `codex.exe`、`@openai\codex`、VS Code OpenAI/Codex/ChatGPT 扩展宿主、Codex/ChatGPT 桌面相关进程。监听器本身是登录后常驻的后台进程；发现 Codex 后启动显示窗，检测到 Codex 全部退出后默认关闭显示窗。
+
+自启动安装会优先注册当前用户登录计划任务；当前系统若无权限注册计划任务，则使用 Startup 文件夹快捷方式。两种入口都通过稳定的 Windows PowerShell 启动包装脚本，并自动解析本机 Python。若登录后没有显示，可查看项目根目录下的 `watcher_startup.log`，其中记录了 watcher 是否成功启动及失败原因。
 
 ```powershell
 .\scripts\run_watcher.ps1

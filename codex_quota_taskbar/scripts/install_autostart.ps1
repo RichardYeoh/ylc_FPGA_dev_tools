@@ -1,18 +1,15 @@
-param(
+﻿param(
     [string]$TaskName = "CodexQuotaTaskbarWatcher"
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$PythonExe = (Get-Command python -ErrorAction Stop).Source
-$PythonwExe = Join-Path (Split-Path -Parent $PythonExe) "pythonw.exe"
-if (-not (Test-Path -LiteralPath $PythonwExe)) {
-    $PythonwExe = $PythonExe
-}
+. "$PSScriptRoot\resolve_runtime.ps1"
+$PowerShellExe = Resolve-CodexPowerShell
 
 # Register a per-user logon task first / 优先注册当前用户登录时启动的计划任务
-$Watcher = Join-Path $ProjectRoot "src\codex_quota_watcher.py"
-$Action = New-ScheduledTaskAction -Execute $PythonwExe -Argument "`"$Watcher`"" -WorkingDirectory $ProjectRoot
+$RunWatcher = Join-Path $ProjectRoot "scripts\run_watcher.ps1"
+$Action = New-ScheduledTaskAction -Execute $PowerShellExe -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$RunWatcher`"" -WorkingDirectory $ProjectRoot
 $Trigger = New-ScheduledTaskTrigger -AtLogOn
 $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 try {
@@ -24,16 +21,11 @@ try {
 }
 
 # Fallback to the current user's Startup folder / 回退到当前用户启动文件夹快捷方式
-$RunWatcher = Join-Path $ProjectRoot "scripts\run_watcher.ps1"
-$PwshExe = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
-if (-not $PwshExe) {
-    $PwshExe = (Get-Command powershell -ErrorAction Stop).Source
-}
 $StartupPath = [Environment]::GetFolderPath("Startup")
 $ShortcutPath = Join-Path $StartupPath "$TaskName.lnk"
 $Shell = New-Object -ComObject WScript.Shell
 $Shortcut = $Shell.CreateShortcut($ShortcutPath)
-$Shortcut.TargetPath = $PwshExe
+$Shortcut.TargetPath = $PowerShellExe
 $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$RunWatcher`""
 $Shortcut.WorkingDirectory = $ProjectRoot
 $Shortcut.WindowStyle = 7

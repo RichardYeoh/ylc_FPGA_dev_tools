@@ -2,5 +2,6 @@ __pycache__/
 *.pyc
 .tmp_pkg/
 quota_cache.json
+watcher_startup.log
 taskbar_capture*.png
 taskbar_*.png
