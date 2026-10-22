@@ -1,0 +1,12 @@
+# office_md 运行时依赖（锁定版本，与本机 Python 3.13 实测通过的组合一致）
+# 离线安装： python -m pip install --no-index --find-links=vendor\wheels -r requirements.txt
+python-docx==1.2.0
+openpyxl==3.1.5
+python-pptx==1.0.2
+xlrd==2.0.2
+mammoth==1.11.0
+markdownify==1.2.2
+lxml==6.0.2
+Pillow==12.2.0
+# 老格式 .doc/.ppt 经 Office COM 转换所需（目标机已装 Office）
+pywin32>=306

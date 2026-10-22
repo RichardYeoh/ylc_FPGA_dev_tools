@@ -1,0 +1,2 @@
+# office_md 打包期依赖（仅开发机需要，产物运行不需要）
+PyInstaller>=6.10
